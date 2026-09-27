@@ -7,7 +7,7 @@ name = "distfuzz"
 version = "0.1.0"
 description = "Fuzzers for torch.distributed, DTensor and distributed checkpointing"
 readme = "README.md"
-license = { text = "MIT" }
+license = { text = "Proprietary. All rights reserved." }
 authors = [{ name = "Temilola Olowolayemo" }]
 requires-python = ">=3.10"
 dependencies = ["torch>=2.4"]

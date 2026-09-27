@@ -5,6 +5,7 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Changed
+- License: MIT replaced with all rights reserved.
 - README: key terms, diagrams for the three fuzzers and the finding-to-report pipeline, a guide to reading fuzzer output, and an annotated repository layout.
 
 ## [0.1.0] - 2026-09-27
