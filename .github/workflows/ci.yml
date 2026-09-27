@@ -40,7 +40,7 @@ jobs:
       - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
       - run: pip install -e ".[dev]"
       - name: Host tests (multi-rank tests are skipped)
-        run: pytest || [ $? -eq 5 ]
+        run: pytest
 
   multirank:
     runs-on: ubuntu-latest
@@ -55,4 +55,4 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Multi-rank tests in Docker (hosted runners have 2 CPUs)
-        run: docker run --rm --memory 3g --cpus 2 --shm-size 1g distfuzz:cpu sh -c 'python -m pytest -m multirank || [ $? -eq 5 ]'
+        run: docker run --rm --memory 3g --cpus 2 --shm-size 1g distfuzz:cpu python -m pytest -m multirank
