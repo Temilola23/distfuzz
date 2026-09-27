@@ -37,7 +37,7 @@ torch.set_num_threads(1)
 torch._dynamo.config.cache_size_limit = 64
 torch._dynamo.config.accumulated_cache_size_limit = 4096
 
-COV_NEW = set()
+COV_NEW: set[str] = set()
 TARGET = os.sep + os.path.join("torch", "distributed", "tensor") + os.sep
 if args.cov:
     mon = sys.monitoring  # type: ignore[attr-defined]  # coverage needs Python 3.12+
