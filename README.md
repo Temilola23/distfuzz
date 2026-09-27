@@ -32,25 +32,23 @@ Each fuzzer is differential. It runs the same program twice, once through the di
 
 ## Architecture
 
+The loop is the same for the three fuzzers; the collectives fuzzer is shown. DTensor and DCP replace the reference with a plain-tensor or unsharded run of the same program on the ranks themselves.
+
 ```mermaid
-flowchart LR
-    subgraph fuzzer["fuzzer process"]
-        D[API description] --> G[generator / mutator]
-        K[(corpus)] --> G
-        G -->|program| REF[single-process reference]
-        REF -->|expected values, valid/invalid/uncertain| O[oracle]
-        O -->|new signature| F[(findings)]
-        O -->|new coverage| K
-        F --> MIN[ddmin minimizer]
-        MIN --> RP[standalone repro.py]
+flowchart TB
+    D[API description] --> G[generator / mutator]
+    K[(corpus)] --> G
+    G -->|program| REF[single-process reference]
+    G -->|program| W
+    subgraph W["N persistent ranks, Gloo over TCP"]
+        direction LR
+        R0[rank 0] ~~~ R1[rank 1] ~~~ RN[rank N-1]
     end
-    subgraph world["N persistent ranks, Gloo over TCP"]
-        R0[rank 0]
-        R1[rank 1]
-        RN[rank N-1]
-    end
-    G -->|program| world
-    world -->|outputs, exceptions, coverage, exit codes| O
+    REF -->|expected values; valid, invalid or uncertain| O[oracle]
+    W -->|outputs, exceptions, coverage, exit codes| O
+    O -->|new coverage| K
+    O -->|new signature| F[(findings)]
+    F --> MIN[ddmin minimizer] --> RP[standalone repro.py]
     RP --> B[distfuzz.repro: reliability, bisection, bundle]
 ```
 
