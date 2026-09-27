@@ -281,4 +281,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/PR_GUIDE.md](docs/PR_GUIDE.md).
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+All rights reserved. No use, copying, modification or distribution without written permission; see [LICENSE](LICENSE).
