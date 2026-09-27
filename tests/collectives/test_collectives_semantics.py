@@ -179,15 +179,20 @@ CASES += [
 ]
 
 
+def _family(name):
+    parts = name.split("/")
+    if parts[0] != "allreduce":
+        return parts[0]
+    # A rejected op can fail inside the Gloo work and close the pairs, after which every later collective in that
+    # session times out (seen on x86 runners for bitwise ops on floats, everywhere for AVG on ints). Isolate them.
+    return name if parts[2] in ("AVG", "BAND", "BOR", "BXOR") else "/".join(parts[:2])
+
+
 @pytest.fixture(scope="module")
 def R():
-    # one session per family: an int/bool AVG failure raises inside the Gloo work and kills the pairs,
-    # after which every collective in that session times out
     fams = {}
     for name, fn in CASES:
-        fams.setdefault(
-            name.split("/")[0] + "/" + name.split("/")[1] if name.startswith("allreduce/") else name.split("/")[0], []
-        ).append((name, fn))
+        fams.setdefault(_family(name), []).append((name, fn))
     out = {}
     for cases in fams.values():
         out.update(run_cases(cases, world=4, timeout=4.0, deadline=600))
