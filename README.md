@@ -20,6 +20,27 @@ Each fuzzer is differential. It runs the same program twice, once through the di
 | `distfuzz.dcp` | `torch.distributed.checkpoint` save/load and `get_state_dict`/`set_state_dict` across FSDP2, TP, HSDP, DDP and 2-D meshes | Checkpoints are reloaded into a poisoned model under a different world size and parallelism; loaded state must match saved state bitwise, and training must match an unsharded reference. |
 | `distfuzz.repro` | Any finding or repro script | syzbot-style bundle: reliability over N fresh containers, bisection across 11 releases (2.4.1 to 2.14.0) and a pinned nightly, pinned Dockerfile, report, dashboard. |
 
+## Key terms
+
+| Term | Meaning here |
+|---|---|
+| Rank | One process in a distributed job. A run with world size 4 has ranks 0 to 3. |
+| Collective | A call every rank makes together, such as `all_reduce` (every rank contributes a tensor and gets back the sum). |
+| Gloo | PyTorch's CPU backend for collectives. NCCL is the GPU backend and is out of scope here. |
+| Process group | The set of ranks a collective runs over. `new_group` and `new_subgroups` create smaller ones. |
+| DTensor | A tensor split ("sharded") across ranks. Placements say how: `Shard(d)` splits dim `d`, `Replicate()` copies it, `Partial(op)` holds unreduced pieces. |
+| DCP | `torch.distributed.checkpoint`: saves a sharded model and loads it back, possibly onto a different layout. |
+| Program | A short list of API calls, run on every rank, that the fuzzer generates and executes. Stored as JSON. |
+| Description | The table entry for one API call: its argument types, what it returns and how often to pick it (`collectives/desc.py`). |
+| Oracle | What decides whether a result is wrong. Here, an independent computation of the correct answer. |
+| Reference model | The single-process oracle for collectives: it computes what every rank should hold after every call. |
+| Finding | Anything the oracle flags: a wrong value, a hang, a crash, a rank desync, an unexpected error. Saved as JSON with its program. |
+| Signature | A short key that groups findings of the same kind, e.g. `WRONG_RESULT\|all_reduce\|torch.int64`. |
+| Corpus | Programs kept because they reached new code. Guided mode mutates them; random mode does not keep any. |
+| Minimize | Shrink a failing program, with delta debugging, to the fewest calls that still fail. |
+| Repro | A standalone PyTorch script, with no distfuzz imports, that shows one bug. |
+| Bundle | A folder per bug with the repro, a pinned Dockerfile, a 20-run reliability result and a per-release bisection table. |
+
 ## How it maps to syzkaller
 
 | syzkaller | distfuzz | Gap |
@@ -52,6 +73,72 @@ flowchart TB
     F --> MIN[ddmin minimizer] --> RP[standalone repro.py]
     RP --> B[distfuzz.repro: reliability, bisection, bundle]
 ```
+
+### The three fuzzers side by side
+
+All three share the loop above. What changes is what a program contains and what the oracle compares.
+
+```mermaid
+flowchart LR
+    subgraph C["collectives"]
+        C1["program: tensors + c10d calls<br/>(all_reduce, broadcast, p2p, groups, waits)"] --> C2["oracle: single-process reference model<br/>+ sentinel cells around each view"]
+    end
+    subgraph D["dtensor"]
+        D1["program: DTensor ops on a 1-D or 2-D mesh<br/>with Shard / Replicate / Partial placements"] --> D2["oracle: same program on plain tensors;<br/>full_tensor() must match"]
+    end
+    subgraph P["dcp"]
+        P1["scenario: model + parallelism (FSDP2, TP, HSDP, DDP)<br/>save, then load on the same or another layout"] --> P2["oracle: reload into a poisoned model;<br/>restored state must equal the original"]
+    end
+```
+
+### From a finding to a report
+
+```mermaid
+flowchart LR
+    F["finding JSON<br/>(program + what went wrong)"] --> M["minimize<br/>(ddmin: drop calls, simplify args)"]
+    M --> R["repro.py<br/>(plain PyTorch, runs under torchrun)"]
+    R --> REL["reliability<br/>(20 runs in fresh containers)"]
+    R --> BIS["bisection<br/>(each release 2.4.1 to 2.14.0 + nightly)"]
+    REL --> B[("bundle/<br/>repro.py, Dockerfile, run.sh,<br/>bundle.json, REPORT.md, report.html")]
+    BIS --> B
+    B --> DASH["bundles/index.html<br/>(dashboard of every bug)"]
+```
+
+## Reading the output
+
+**Fuzzer progress line** (collectives), printed every 30 seconds:
+
+```
+[random] t=31.2s execs=179 exec/s=5.74 cover=1156 corpus=0 findings=12 hang=0 crash=1 oom=0 checked=103
+```
+
+| Field | Meaning |
+|---|---|
+| `execs` | programs run so far |
+| `exec/s` | programs per second, end to end |
+| `cover` | distinct lines of `torch/distributed` Python code reached so far |
+| `corpus` | programs kept for mutation (always 0 in random mode) |
+| `findings` | distinct signatures found so far |
+| `hang`, `crash` | programs where a rank timed out or died |
+| `oom` | programs killed for running out of memory (the Docker memory limit) |
+| `checked` | programs whose values the reference model could fully verify |
+
+The final JSON line adds `valid` / `invalid` / `uncertain` (the reference model's verdict on each program: legal, should raise, or not modeled) and `restarts` (times the rank processes were restarted).
+
+**Output folder** (`--out runs/<name>`):
+
+| Path | Contents |
+|---|---|
+| `findings/<id>.json` | one file per signature: kind, signature, the program, per-rank evidence |
+| `findings/<id>_repro.py` | written by `minimize`: the standalone repro |
+| `corpus/` | programs kept in guided mode |
+| `stats.jsonl` | one progress snapshot per line, for plotting |
+| `summary.json` | final stats and the list of findings |
+| `logs/` | per-rank logs from crashes and hangs |
+
+**Minimizer:** `5 -> 2 calls; repro: runs/.../<id>_repro.py` means the failing program shrank from 5 calls to 2 and the repro was written.
+
+**Bundle** (`bundles/<name>/`): open `report.html`. It shows the title, how far the program was minimized, reliability (for example `20/20 deterministic` on 2.14.0) and a table of releases marked bad or good, plus `run.sh` to rerun it.
 
 ## Quickstart
 
@@ -130,15 +217,62 @@ What does not, yet:
 ## Repository layout
 
 ```
-src/distfuzz/
-  collectives/   c10d/Gloo fuzzer
-  dtensor/       DTensor differential fuzzer
-  dcp/           checkpoint save/load/reshard fuzzer
-  repro/         repro bundles, reliability, release bisection
-tests/           host tests; multi-rank tests are marked `multirank`
-examples/repros/ plain PyTorch repros for the bugs above
-examples/programs/ fuzzer programs behind the repro bundles
-docs/            PR guide
+distfuzz/
+├── src/distfuzz/
+│   ├── collectives/            c10d/Gloo fuzzer
+│   │   ├── desc.py             API descriptions: every call, its argument types, return types and pick weight
+│   │   ├── prog.py             program generator and mutator (insert, remove, change arg, splice, diverge)
+│   │   ├── tensors.py          builds each rank's input tensors, including strided views with sentinel cells
+│   │   ├── semantics.py        shared rules for roots, group membership and shapes
+│   │   ├── interp.py           runs one program on one rank; Python line coverage via sys.monitoring
+│   │   ├── executor.py         keeps N rank processes alive; runs programs, restarts on hang or crash
+│   │   ├── reference.py        single-process reference model: expected value of every tensor on every rank
+│   │   ├── oracle.py           compares ranks with the reference and turns differences into findings
+│   │   ├── faults.py           fault and lifecycle ops for --fault mode (drop a Work, resize in flight, abort)
+│   │   ├── fuzzer.py           the main loop: pick or mutate a program, run, check, record, keep corpus
+│   │   ├── minimize.py         delta-debugging minimizer for findings
+│   │   ├── replay.py           replays a crash or hang with the programs that ran before it
+│   │   └── __main__.py         CLI: fuzz, bench, minimize, replay
+│   ├── dtensor/                DTensor differential fuzzer
+│   │   ├── gen.py              op templates, meshes, placements and shapes; builds programs
+│   │   ├── runtime.py          inputs, tolerances and value comparison
+│   │   ├── worker.py           runs a program on one rank, sharded and plain, and reports mismatches
+│   │   ├── world.py            starts and talks to the rank processes
+│   │   ├── fuzz.py             the main loop and CLI
+│   │   ├── minimize.py         ddmin minimizer and repro writer
+│   │   └── report.py           summarizes a campaign
+│   ├── dcp/                    distributed checkpoint fuzzer
+│   │   ├── gen.py              scenarios: model, parallelism, save/load options, layout changes
+│   │   ├── runtime.py          small models (MLP, attention, norms) and the save/load/compare steps
+│   │   ├── worker.py, world.py rank process and the world that drives it
+│   │   ├── standalone.py       runs one scenario on its own, for repros
+│   │   ├── fuzz.py             the main loop and CLI
+│   │   ├── minimize.py         scenario minimizer
+│   │   └── report.py           summarizes a campaign
+│   └── repro/                  syzbot-style bundles, reliability and bisection
+│       ├── extract.py          loads a finding or repro script from any fuzzer
+│       ├── gen_distfuzz.py     turns a collectives finding into a plain PyTorch script
+│       ├── gen_dtensor.py      the same for DTensor findings
+│       ├── pipeline.py         reproduce, minimize, reliability (k/N) and per-release testing
+│       ├── dock.py             builds one Docker image per PyTorch release and runs fresh containers
+│       ├── versions.py         the release matrix (2.4.1 to 2.14.0 and a pinned nightly)
+│       ├── report.py           parses tracebacks into titles and guilty frames
+│       ├── dedup.py            groups bundles that are the same bug
+│       ├── upstream.py         searches pytorch/pytorch for related issues
+│       ├── bundle.py           writes a bundle folder
+│       ├── render.py           REPORT.md, report.html and the index.html dashboard
+│       ├── cli.py, __main__.py CLI: images, bundle, specs, reliability, dedup, dashboard, upstream
+│       └── Dockerfile.torch    image template for a given PyTorch release
+├── tests/                      host tests; multi-rank tests are marked `multirank` and run in Docker
+├── examples/
+│   ├── repros/                 plain PyTorch scripts, one or more per bug (collectives, dtensor, dcp, faults)
+│   ├── programs/               the fuzzer programs behind the repro bundles
+│   └── repro_specs.json        list of bundles to build with `distfuzz.repro specs`
+├── docs/PR_GUIDE.md            how to write and review a PR
+├── .github/                    CI workflow, PR template, issue templates
+├── Dockerfile, Makefile        the distfuzz:cpu image and common commands
+├── BACKLOG.md                  roadmap and open questions
+└── CHANGELOG.md
 ```
 
 ## Contributing
