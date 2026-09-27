@@ -7,6 +7,7 @@ import torch
 import torch.distributed as dist
 
 from . import tensors as T
+from .desc import CALLS
 from .prog import effective_args
 from .semantics import a2a_shapes, list_len, resolve_root, salt
 
@@ -99,6 +100,11 @@ def exec_call(i, c, env: RankEnv):
     work = None
     if op == "tensor":
         env.t[rets["out"]] = env.mk(a["spec"], salt(i, "out"))
+        return
+    if CALLS[op].get("fault"):
+        from .faults import exec_fault
+
+        exec_fault(op, a, env)
         return
     if op == "local":
         t = env.tensor(a["t"])

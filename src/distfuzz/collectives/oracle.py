@@ -14,6 +14,8 @@ TOL = {
     torch.complex64: (1e-4, 1e-5),
 }
 
+MEMCORRUPT = {-11: "SIGSEGV", -6: "SIGABRT", -4: "SIGILL", -8: "SIGFPE", -7: "SIGBUS"}
+
 
 def norm(msg: str) -> str:
     msg = re.sub(r"\[[^\]]*/[^\]]*\]", "[..]", msg)
@@ -91,6 +93,16 @@ def classify(prog, res, ref=None):
         "checked": False,
         "oom": False,
     }
+    victims = {c["args"]["victim"] for c in prog["calls"] if c["op"] == "crash_rank"}
+    if res["kind"] == "crash" and victims:
+        # crash_rank SIGKILLs its victim on purpose; only a survivor dying of memory corruption counts
+        bad = [
+            (r, MEMCORRUPT[e]) for r, e in enumerate(res.get("exitcodes") or []) if r not in victims and e in MEMCORRUPT
+        ]
+        if not bad:
+            return [], info
+        detail = f"victims={sorted(victims)} survivor crash {bad}; log:\n{res.get('crash_log', '')[-1200:]}"
+        return [dict(kind="KILL_SURVIVOR_CRASH", sig=f"KILL_SURVIVOR_CRASH|{bad[0][1]}", detail=detail)], info
     if res["kind"] == "crash":
         if -9 in (res.get("exitcodes") or []):  # SIGKILL from the OOM killer, not a torch crash
             info["oom"] = True
@@ -103,7 +115,10 @@ def classify(prog, res, ref=None):
         head = norm(m.group(1)) if m else f"exitcodes={res.get('exitcodes')}"
         return [dict(kind="CRASH", sig=f"CRASH|{ref.status}|{head}", detail=log[-1500:])], info
     if res["kind"] == "hang":
-        return [dict(kind="HANG", sig=f"HANG|{ref.status}", detail=f"stuck ranks {res.get('stuck_ranks')}")], info
+        detail = f"stuck ranks {res.get('stuck_ranks')}"
+        if victims:
+            return [dict(kind="KILL_SURVIVOR_HANG", sig=f"KILL_SURVIVOR_HANG|{ref.status}", detail=detail)], info
+        return [dict(kind="HANG", sig=f"HANG|{ref.status}", detail=detail)], info
     rs = res["results"]
     for r in rs:
         if r.get("executor_error"):

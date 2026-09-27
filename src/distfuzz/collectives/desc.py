@@ -105,6 +105,33 @@ CALLS: dict[str, dict[str, Any]] = {
         rets={"outs": "list"},
         weight=2,
     ),
+    # Fault and lifecycle ops: weight 0, so only `--fault` mode (FAULT_WEIGHTS) generates them.
+    # The reference model treats them as "uncertain", so only the crash, hang and guard oracles apply.
+    "drop_work": dict(args={"w": "work", "gc": "bool"}, rets={}, weight=0, fault=True),
+    "wait_twice": dict(args={"w": "work"}, rets={}, weight=0, fault=True),
+    "wait_late": dict(args={"w": "work"}, rets={}, weight=0, fault=True),
+    "destroy_group": dict(args={"group": "group"}, rets={}, weight=0, fault=True),
+    "abort_group": dict(args={"group": "group"}, rets={}, weight=0, fault=True),
+    "async_resize": dict(
+        args={"t": "tensor", "op": "redop", "group": "group", "how": "resize_how"}, rets={}, weight=0, fault=True
+    ),
+    "async_free": dict(args={"t": "tensor", "op": "redop", "group": "group"}, rets={}, weight=0, fault=True),
+    "batch_mismatch": dict(args={"t": "tensor", "kind": "batch_kind"}, rets={}, weight=0, fault=True),
+    "crash_rank": dict(args={"victim": "rank", "group": "group", "when": "crash_when"}, rets={}, weight=0, fault=True),
+    "short_timeout_probe": dict(args={"group": "group"}, rets={}, weight=0, fault=True),
 }
 
 GENERATABLE = [n for n, d in CALLS.items() if d["weight"] > 0]
+FAULT_OPS = [n for n, d in CALLS.items() if d.get("fault")]
+FAULT_WEIGHTS = {
+    "drop_work": 6,
+    "wait_twice": 5,
+    "wait_late": 4,
+    "destroy_group": 6,
+    "abort_group": 5,
+    "async_resize": 8,
+    "async_free": 7,
+    "batch_mismatch": 6,
+    "crash_rank": 3,
+    "short_timeout_probe": 4,
+}

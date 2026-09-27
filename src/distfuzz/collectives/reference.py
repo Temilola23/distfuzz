@@ -5,6 +5,7 @@ import math
 import torch
 
 from . import tensors as T
+from .desc import CALLS
 from .prog import effective_args
 from .semantics import a2a_shapes, list_len, resolve_root, salt
 
@@ -146,6 +147,10 @@ class Reference:
 
     def step(self, i, c):
         op, rets, W = c["op"], c.get("rets", {}), self.W
+        if CALLS[op].get("fault"):
+            # no value semantics: only the crash, hang and guard oracles apply
+            self.racy = True
+            raise Stop("uncertain", f"fault op {op}")
         eff = [effective_args(c, r) for r in range(W)]
         if op == "tensor":
             for r in range(W):

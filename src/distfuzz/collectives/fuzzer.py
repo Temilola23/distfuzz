@@ -14,7 +14,16 @@ from .prog import Generator, Mutator, dumps, has_divergence
 
 class Fuzzer:
     def __init__(
-        self, outdir, mode="guided", world=4, timeout=TIMEOUT, detail=False, seed=0, gen_prob=0.1, diverge_weight=6
+        self,
+        outdir,
+        mode="guided",
+        world=4,
+        timeout=TIMEOUT,
+        detail=False,
+        seed=0,
+        gen_prob=0.1,
+        diverge_weight=6,
+        fault=False,
     ):
         self.outdir = outdir
         self.mode = mode
@@ -23,10 +32,12 @@ class Fuzzer:
         os.makedirs(os.path.join(outdir, "logs"), exist_ok=True)
         self.rng = random.Random(seed)
         self.world = world
-        self.gen = Generator(world, self.rng)
-        self.mut = Mutator(world, self.rng, diverge_weight=diverge_weight)
+        self.fault = fault
+        self.gen = Generator(world, self.rng, fault=fault)
+        self.mut = Mutator(world, self.rng, diverge_weight=diverge_weight, fault=fault)
         self.sess = Session(world, timeout=timeout, detail=detail, coverage=True, logdir=os.path.join(outdir, "logs"))
-        self.gen_prob = gen_prob
+        # fault programs mutate poorly (a crashing prefix keeps crashing), so generate more often
+        self.gen_prob = max(gen_prob, 0.35) if fault else gen_prob
         self.cover = set()
         self.corpus = []
         self.findings = {}
@@ -74,7 +85,7 @@ class Fuzzer:
             detail=f["detail"],
             info=info,
         )
-        if f["kind"] in ("CRASH", "HANG"):
+        if f["kind"] in ("CRASH", "HANG", "KILL_SURVIVOR_CRASH", "KILL_SURVIVOR_HANG"):
             rec["history"] = list(self.history)[:-1]
         self.findings[sig] = rec
         with open(os.path.join(self.outdir, "findings", f"{h}.json"), "w") as fh:

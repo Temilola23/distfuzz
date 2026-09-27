@@ -83,7 +83,21 @@ class Session:
         self.started = False
         self.restarts = 0
 
-    def start(self):
+    def start(self, attempts=8):
+        # Fault mode restarts the session constantly and a fresh rank sometimes dies during init
+        # (port still in TIME_WAIT after a crash). Retry on a fresh port instead of ending the run.
+        for attempt in range(attempts):
+            try:
+                self._spawn()
+                self.started = True
+                return
+            except (EOFError, OSError, RuntimeError) as e:
+                last = e
+                self._kill()
+                time.sleep(0.5 + 0.3 * attempt)
+        raise RuntimeError(f"session failed to start after {attempts} attempts: {last}")
+
+    def _spawn(self):
         ctx = mp.get_context("spawn")
         port = _free_port()
         self.procs, self.conns = [], []
@@ -98,7 +112,14 @@ class Session:
             if not c.poll(max(0.1, deadline - time.time())):
                 raise RuntimeError("rank did not become ready")
             c.recv()
-        self.started = True
+
+    def _kill(self):
+        for p in self.procs:
+            if p.is_alive():
+                p.kill()
+            p.join(timeout=3)
+        for c in self.conns:
+            c.close()
 
     def stop(self, hard=False):
         if not self.started:
@@ -142,8 +163,26 @@ class Session:
         if not self.started:
             self.start()
         t0 = time.time()
-        for c in self.conns:
-            c.send(("run", prog))
+        sent = True
+        try:
+            for c in self.conns:
+                c.send(("run", prog))
+        except OSError:
+            sent = False
+        dead = [r for r, p in enumerate(self.procs) if not p.is_alive()]
+        if dead or not sent:
+            # a rank died after reporting the previous program, e.g. a late abort from in-flight work
+            out = {
+                "kind": "crash",
+                "late": True,
+                "results": [{"died": True}] * self.world,
+                "wall": 0.0,
+                "stuck_ranks": [],
+                "exitcodes": [p.exitcode for p in self.procs],
+                "crash_log": self._log_tails(dead),
+            }
+            self.restart()
+            return out
         results = [None] * self.world
         pending = {self.conns[r]: r for r in range(self.world)}
         dl = t0 + self.hang_deadline
