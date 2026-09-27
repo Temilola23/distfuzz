@@ -54,5 +54,5 @@ jobs:
           load: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      - name: Multi-rank tests in Docker
-        run: docker run --rm --memory 3g --cpus 4 --shm-size 1g distfuzz:cpu sh -c 'python -m pytest -m multirank || [ $? -eq 5 ]'
+      - name: Multi-rank tests in Docker (hosted runners have 2 CPUs)
+        run: docker run --rm --memory 3g --cpus 2 --shm-size 1g distfuzz:cpu sh -c 'python -m pytest -m multirank || [ $? -eq 5 ]'
