@@ -1,0 +1,28 @@
+[rank 2] raised RuntimeError: max(): Expected reduction dim to be specified for input.numel() == 0. Specify the reduction dim with the 'dim' argument.
+[rank 3] raised RuntimeError: max(): Expected reduction dim to be specified for input.numel() == 0. Specify the reduction dim with the 'dim' argument.
+W0927 01:26:54.156000 7 site-packages/torch/multiprocessing/spawn.py:165] Terminating process 9 via signal SIGTERM
+W0927 01:26:54.167000 7 site-packages/torch/multiprocessing/spawn.py:165] Terminating process 10 via signal SIGTERM
+Traceback (most recent call last):
+  File "/repro/repro.py", line 77, in <module>
+    mp.spawn(main, args=(4, port, 'max_empty_shard'), nprocs=4, join=True)
+  File "/usr/local/lib/python3.12/site-packages/torch/multiprocessing/spawn.py", line 340, in spawn
+    return start_processes(fn, args, nprocs, join, daemon, start_method="spawn")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/multiprocessing/spawn.py", line 296, in start_processes
+    while not context.join():
+              ^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/multiprocessing/spawn.py", line 211, in join
+    raise ProcessRaisedException(msg, error_index, failed_process.pid)
+torch.multiprocessing.spawn.ProcessRaisedException: 
+
+-- Process 2 terminated with the following error:
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/site-packages/torch/multiprocessing/spawn.py", line 87, in _wrap
+    fn(i, *args)
+  File "/repro/repro.py", line 71, in main
+    CASES[name](rank, mesh)
+  File "/repro/repro.py", line 60, in max_empty_shard
+    out = x.max()
+          ^^^^^^^
+RuntimeError: max(): Expected reduction dim to be specified for input.numel() == 0. Specify the reduction dim with the 'dim' argument.
+

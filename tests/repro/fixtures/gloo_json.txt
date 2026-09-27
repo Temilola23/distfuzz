@@ -1,0 +1,13 @@
+all_reduce: MISMATCH rank 3 var t5
+   expected (3, 2) torch.int64: [-4, 1, 5, -4, -7, -2]
+   actual   (3, 2) torch.int64: [-4, 0, 2, -3, -4, -2]
+all_reduce: MISMATCH rank 2 var t5
+   expected (3, 2) torch.int64: [-4, 1, 5, -4, -7, -2]
+   actual   (3, 2) torch.int64: [-4, 0, 2, -3, -4, -2]
+all_reduce: MISMATCH rank 1 var t5
+   expected (3, 2) torch.int64: [-4, 1, 5, -4, -7, -2]
+   actual   (3, 2) torch.int64: [-4, 0, 2, -3, -4, -2]
+all_reduce: MISMATCH rank 0 var t5
+   expected (3, 2) torch.int64: [-4, 1, 5, -4, -7, -2]
+   actual   (3, 2) torch.int64: [-4, -3, 0, -4, 2, -2]
+[distfuzz-repro] DONE torch 2.14.0+cpu

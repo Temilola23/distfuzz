@@ -1,0 +1,47 @@
+placements (_MaskPartial(reduce_op=sum, offset_shape=torch.Size([8, 3]), offset_dim=0),)
+embedding 1st full_tensor: OK
+   ref  (3, 3) torch.float32: [-1.0158296823501587, -0.1434038132429123, -1.7633473873138428, -0.5571613907814026, -0.44303178787231445, -1.1247514486312866, 0.863935649394989, 0.3769856095314026, 0.02190585993230343]
+   dt   (3, 3) torch.float32: [-1.0158296823501587, -0.1434038132429123, -1.7633473873138428, -0.5571613907814026, -0.44303178787231445, -1.1247514486312866, 0.863935649394989, 0.3769856095314026, 0.02190585993230343]  placements=(_MaskPartial(reduce_op=sum, offset_shape=torch.Size([8, 3]), offset_dim=0),)
+W0927 01:27:02.640000 7 site-packages/torch/multiprocessing/spawn.py:165] Terminating process 9 via signal SIGTERM
+W0927 01:27:02.672000 7 site-packages/torch/multiprocessing/spawn.py:165] Terminating process 11 via signal SIGTERM
+W0927 01:27:02.675000 7 site-packages/torch/multiprocessing/spawn.py:165] Terminating process 12 via signal SIGTERM
+Traceback (most recent call last):
+  File "/repro/repro.py", line 78, in <module>
+    mp.spawn(main, args=(4, port, 'embedding_full_tensor_twice'), nprocs=4, join=True)
+  File "/usr/local/lib/python3.12/site-packages/torch/multiprocessing/spawn.py", line 340, in spawn
+    return start_processes(fn, args, nprocs, join, daemon, start_method="spawn")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/multiprocessing/spawn.py", line 296, in start_processes
+    while not context.join():
+              ^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/multiprocessing/spawn.py", line 211, in join
+    raise ProcessRaisedException(msg, error_index, failed_process.pid)
+torch.multiprocessing.spawn.ProcessRaisedException: 
+
+-- Process 1 terminated with the following error:
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/site-packages/torch/multiprocessing/spawn.py", line 87, in _wrap
+    fn(i, *args)
+  File "/repro/repro.py", line 72, in main
+    CASES[name](rank, mesh)
+  File "/repro/repro.py", line 65, in embedding_full_tensor_twice
+    show(rank, "embedding 2nd full_tensor", F.embedding(idx, w), out)
+  File "/repro/repro.py", line 34, in show
+    full = dt.full_tensor() if isinstance(dt, DTensor) else dt
+           ^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/distributed/tensor/_api.py", line 856, in full_tensor
+    redist_res = self.redistribute(
+                 ^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/distributed/tensor/_api.py", line 813, in redistribute
+    return Redistribute.apply(
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/distributed/tensor/_redistribute.py", line 1993, in forward
+    output = redistribute_local_tensor(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/distributed/tensor/_redistribute.py", line 1704, in redistribute_local_tensor
+    new_local_tensor = partial_spec._reduce_value(
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/distributed/tensor/placement_types.py", line 1975, in _reduce_value
+    raise AssertionError
+AssertionError
+

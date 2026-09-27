@@ -1,0 +1,50 @@
+/usr/local/lib/python3.12/site-packages/torch/distributed/_tensor/random.py:38: UserWarning: DTensor random operators may not have complete support on cpu device mesh
+  warnings.warn(
+/usr/local/lib/python3.12/site-packages/torch/distributed/_tensor/random.py:38: UserWarning: DTensor random operators may not have complete support on cpu device mesh
+  warnings.warn(
+/usr/local/lib/python3.12/site-packages/torch/distributed/_tensor/random.py:38: UserWarning: DTensor random operators may not have complete support on cpu device mesh
+  warnings.warn(
+/usr/local/lib/python3.12/site-packages/torch/distributed/_tensor/random.py:38: UserWarning: DTensor random operators may not have complete support on cpu device mesh
+  warnings.warn(
+W0927 01:29:30.927000 281473148626112 torch/multiprocessing/spawn.py:146] Terminating process 9 via signal SIGTERM
+W0927 01:29:30.949000 281473148626112 torch/multiprocessing/spawn.py:146] Terminating process 11 via signal SIGTERM
+Traceback (most recent call last):
+  File "/repro/repro.py", line 75, in <module>
+    mp.spawn(main, args=(4, port, 'setitem_shard'), nprocs=4, join=True)
+  File "/usr/local/lib/python3.12/site-packages/torch/multiprocessing/spawn.py", line 282, in spawn
+    return start_processes(fn, args, nprocs, join, daemon, start_method="spawn")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/multiprocessing/spawn.py", line 238, in start_processes
+    while not context.join():
+              ^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/multiprocessing/spawn.py", line 189, in join
+    raise ProcessRaisedException(msg, error_index, failed_process.pid)
+torch.multiprocessing.spawn.ProcessRaisedException: 
+
+-- Process 3 terminated with the following error:
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/site-packages/torch/multiprocessing/spawn.py", line 76, in _wrap
+    fn(i, *args)
+  File "/repro/repro.py", line 69, in main
+    CASES[name](rank, mesh)
+  File "/repro/repro.py", line 59, in setitem_shard
+    x[6] = 100.0
+    ~^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/_compile.py", line 31, in inner
+    return disable_fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/_dynamo/eval_frame.py", line 600, in _fn
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/distributed/_tensor/api.py", line 309, in __torch_dispatch__
+    return DTensor._op_dispatcher.dispatch(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/distributed/_tensor/_dispatch.py", line 117, in dispatch
+    self.sharding_propagator.propagate(op_info)
+  File "/usr/local/lib/python3.12/site-packages/torch/distributed/_tensor/_sharding_prop.py", line 185, in propagate
+    output_sharding = self.propagate_op_sharding(op_info.schema)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/distributed/_tensor/_sharding_prop.py", line 433, in propagate_op_sharding_non_cached
+    raise NotImplementedError(
+NotImplementedError: Operator aten.select.int does not have a sharding strategy registered.
+

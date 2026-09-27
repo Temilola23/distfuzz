@@ -1,0 +1,151 @@
+[
+ {
+  "name": "gloo-strided-allreduce",
+  "source": "examples/programs/collectives/gloo-strided-allreduce.json",
+  "known": [
+   192920,
+   24836,
+   191187,
+   158903
+  ],
+  "queries": [
+   "gloo non-contiguous all_reduce",
+   "gloo strided tensor wrong result"
+  ],
+  "notes": "Gloo reduces the first numel elements of raw memory starting at data_ptr(), ignoring strides, for a non-dense view (here: rank 0 passes a transposed-storage int64 [3,2] view, the other ranks pass contiguous tensors). Every rank gets a wrong sum and no error is raised."
+ },
+ {
+  "name": "gloo-strided-sweep",
+  "source": "examples/repros/collectives/gloo_strided_sweep.py",
+  "known": [
+   192920,
+   24836,
+   191187,
+   158903
+  ],
+  "queries": [
+   "gloo scatter stride"
+  ],
+  "notes": "Hand-written sweep over every Gloo collective with a stride-2 view whose gap cells hold a sentinel. The primary title is all_reduce; alt titles list the other affected collectives and the out-of-view writes."
+ },
+ {
+  "name": "dtensor-setitem-shard",
+  "source": "examples/repros/dtensor/cases.py::setitem_shard",
+  "known": [
+   118461,
+   172350
+  ],
+  "queries": [
+   "DTensor setitem shard",
+   "DTensor __setitem__"
+  ]
+ },
+ {
+  "name": "dtensor-setitem-shard-fuzzprog",
+  "source": "examples/programs/dtensor/dtensor-setitem-shard-fuzzprog.json",
+  "bisect": false
+ },
+ {
+  "name": "dtensor-fill-partial",
+  "source": "examples/repros/dtensor/cases.py::fill_partial",
+  "known": [
+   172485
+  ],
+  "queries": [
+   "DTensor fill_ Partial",
+   "DTensor Partial in-place"
+  ]
+ },
+ {
+  "name": "dtensor-fill-partial-fuzzprog",
+  "source": "examples/programs/dtensor/dtensor-fill-partial-fuzzprog.json",
+  "bisect": false
+ },
+ {
+  "name": "dtensor-mse-loss-uneven",
+  "source": "examples/repros/dtensor/cases.py::mse_loss_uneven",
+  "known": [
+   162692,
+   185167,
+   171652
+  ],
+  "queries": [
+   "DTensor mse_loss",
+   "DTensor loss uneven shard"
+  ],
+  "base": "2.14.0",
+  "notes": "The case docstring says \"3 rows over 2/4 ranks\". At world size 4 it printed OK for every loss on 2.14.0 and on 2.11.0 (3 runs each), so this bundle uses world size 2. dtensor-loss-uneven-mixed is the world-4 variant that fails on 2.14.",
+  "world": 2
+ },
+ {
+  "name": "dtensor-loss-uneven-mixed",
+  "source": "examples/repros/dtensor/cases.py::loss_uneven_mixed",
+  "bisect": false
+ },
+ {
+  "name": "dtensor-mse-loss-fuzzprog",
+  "source": "examples/programs/dtensor/dtensor-mse-loss-fuzzprog.json",
+  "bisect": false
+ },
+ {
+  "name": "dtensor-inf-norm-partial-max",
+  "source": "examples/repros/dtensor/cases.py::inf_norm_partial_max",
+  "queries": [
+   "DTensor vector_norm inf Partial",
+   "DTensor norm Partial max"
+  ]
+ },
+ {
+  "name": "dtensor-inf-norm-fuzzprog",
+  "source": "examples/programs/dtensor/dtensor-inf-norm-fuzzprog.json",
+  "bisect": false
+ },
+ {
+  "name": "dtensor-flatten-zero-size",
+  "source": "examples/repros/dtensor/cases.py::flatten_zero_size",
+  "queries": [
+   "DTensor flatten zero size",
+   "DTensor view_groups hang",
+   "DTensor view empty tensor"
+  ]
+ },
+ {
+  "name": "dtensor-flatten-zero-size-fuzzprog",
+  "source": "examples/programs/dtensor/dtensor-flatten-zero-size-fuzzprog.json",
+  "bisect": false
+ },
+ {
+  "name": "dtensor-max-empty-shard",
+  "source": "examples/repros/dtensor/cases.py::max_empty_shard",
+  "known": [
+   143372
+  ],
+  "queries": [
+   "DTensor max empty shard",
+   "DTensor reduction empty shard hang"
+  ]
+ },
+ {
+  "name": "dtensor-min-empty-shard-fuzzprog",
+  "source": "examples/programs/dtensor/dtensor-min-empty-shard-fuzzprog.json",
+  "bisect": false
+ },
+ {
+  "name": "dtensor-embedding-full-tensor-twice",
+  "source": "examples/repros/dtensor/cases.py::embedding_full_tensor_twice",
+  "known": [
+   160697,
+   159843,
+   130725
+  ],
+  "queries": [
+   "DTensor embedding MaskPartial",
+   "mask_buffer.data is not None"
+  ]
+ },
+ {
+  "name": "dtensor-embedding-fuzzprog",
+  "source": "examples/programs/dtensor/dtensor-embedding-fuzzprog.json",
+  "bisect": false
+ }
+]

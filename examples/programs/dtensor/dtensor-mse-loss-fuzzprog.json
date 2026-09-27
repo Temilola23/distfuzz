@@ -1,0 +1,79 @@
+{
+ "sig": "MISMATCH|mse_loss|values",
+ "prog": {
+  "mesh": "2d",
+  "inputs": [
+   {
+    "shape": [
+     6,
+     9
+    ],
+    "dtype": "f32",
+    "seed": 261287179,
+    "rg": false,
+    "pl": [
+     "R",
+     "R"
+    ]
+   },
+   {
+    "shape": [
+     9
+    ],
+    "dtype": "f64",
+    "seed": 1062387747,
+    "rg": false,
+    "pl": [
+     "R",
+     "R"
+    ]
+   },
+   {
+    "shape": [
+     9
+    ],
+    "dtype": "f64",
+    "seed": 529760161,
+    "rg": false,
+    "pl": [
+     "R",
+     "R"
+    ]
+   }
+  ],
+  "steps": [
+   {
+    "out": "v1",
+    "expr": "mk(0)"
+   },
+   {
+    "out": "v2",
+    "expr": "CMP('lambda a: a.sum(dim=0)', v1)"
+   },
+   {
+    "out": "v7",
+    "expr": "R(v2, ['S0', 'R'])"
+   },
+   {
+    "out": "v10",
+    "expr": "mk(1)"
+   },
+   {
+    "out": "v11",
+    "expr": "v7 - v10"
+   },
+   {
+    "out": "v15",
+    "expr": "mk(2)"
+   },
+   {
+    "out": "v16",
+    "expr": "F.mse_loss(v11, v15)"
+   }
+  ],
+  "nv": 26,
+  "grad": true,
+  "id": 404
+ },
+ "world": 4
+}

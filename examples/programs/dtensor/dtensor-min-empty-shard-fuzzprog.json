@@ -1,0 +1,33 @@
+{
+ "sig": "RANK_DIVERGENT_ERROR|min|RuntimeError: min(): Expected reduction dim to be specified for input.numel() == N. Specify the reduction dim with the '",
+ "prog": {
+  "mesh": "1d",
+  "inputs": [
+   {
+    "shape": [
+     5
+    ],
+    "dtype": "bool",
+    "seed": 677295203,
+    "rg": false,
+    "pl": [
+     "S0"
+    ]
+   }
+  ],
+  "steps": [
+   {
+    "out": "v4",
+    "expr": "mk(0)"
+   },
+   {
+    "out": "v6",
+    "expr": "v4.min()"
+   }
+  ],
+  "nv": 9,
+  "grad": true,
+  "id": 51
+ },
+ "world": 4
+}

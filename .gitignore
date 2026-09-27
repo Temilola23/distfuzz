@@ -17,5 +17,6 @@ corpus/
 findings/
 bundles/
 cache/
+.cache/
 *.log
 .DS_Store

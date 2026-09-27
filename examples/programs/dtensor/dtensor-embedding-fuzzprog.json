@@ -1,0 +1,62 @@
+{
+ "sig": "DIST_ERR|minimum|AssertionError: ",
+ "prog": {
+  "mesh": "2d",
+  "inputs": [
+   {
+    "shape": [
+     5,
+     4
+    ],
+    "dtype": "f64",
+    "seed": 784286134,
+    "rg": false,
+    "pl": [
+     "R",
+     "S0"
+    ]
+   },
+   {
+    "shape": [
+     4,
+     4
+    ],
+    "dtype": "i64",
+    "seed": 821269464,
+    "kind": "index",
+    "high": 5,
+    "rg": false,
+    "pl": [
+     "R",
+     "R"
+    ]
+   }
+  ],
+  "steps": [
+   {
+    "out": "v0",
+    "expr": "mk(0)"
+   },
+   {
+    "out": "v1",
+    "expr": "v0 - v0"
+   },
+   {
+    "out": "v3",
+    "expr": "mk(1)"
+   },
+   {
+    "out": "v4",
+    "expr": "F.embedding(v3, v1)"
+   },
+   {
+    "out": "v10",
+    "expr": "torch.minimum(v4, v4)"
+   }
+  ],
+  "nv": 11,
+  "grad": true,
+  "id": 551
+ },
+ "world": 4
+}
