@@ -4,7 +4,7 @@ import copy
 import json
 import random
 
-from .desc import CALLS, GENERATABLE
+from .desc import CALLS, FAULT_OPS, FAULT_WEIGHTS, GENERATABLE
 from .tensors import LAYOUTS
 
 DTYPE_W = [
@@ -123,14 +123,15 @@ def _apply_state(st, c):
         st.tensors[rets["out"]] = st.tensors.get(a["t"], {"dtype": "float32", "shape": [1]})
     if "w" in rets:
         st.works.append(rets["w"])
-    if op == "wait" and a.get("w") in st.works:
+    if op in ("wait", "drop_work", "wait_late") and a.get("w") in st.works:
         st.works.remove(a["w"])
 
 
 class Generator:
-    def __init__(self, world, rng: random.Random):
+    def __init__(self, world, rng: random.Random, fault=False):
         self.world = world
         self.rng = rng
+        self.fault = fault
 
     def rand_spec(self, shape=None, dtype=None):
         r = self.rng
@@ -185,6 +186,12 @@ class Generator:
             return r.randint(1, W - 1)
         if typ == "tspec":
             return self.rand_spec()
+        if typ == "resize_how":
+            return r.choice(["grow", "shrink", "zero", "set_"])
+        if typ == "batch_kind":
+            return r.choice(["send_norecv", "recv_nosend", "selfloop", "cross", "double_recv"])
+        if typ == "crash_when":
+            return r.choice(["before", "during_async", "during_barrier"])
         raise KeyError(typ)
 
     def need_tensor(self, st, pre, spec=None, reuse=0.6):
@@ -224,10 +231,15 @@ class Generator:
     def gen_call(self, st: State, op=None):
         r = self.rng
         if op is None:
-            op = wchoice(r, [(n, CALLS[n]["weight"]) for n in GENERATABLE])
+            pool = [(n, CALLS[n]["weight"]) for n in GENERATABLE]
+            if self.fault:
+                pool += [(n, FAULT_WEIGHTS[n]) for n in FAULT_OPS]
+            op = wchoice(r, pool)
             if op == "wait" and not st.works:
                 op = "all_reduce"
         d = CALLS[op]
+        if d.get("fault"):
+            return self.gen_fault_call(st, op)
         pre: list[dict] = []
         a = {}
         g = None
@@ -297,6 +309,63 @@ class Generator:
         _apply_state(st, c)
         return pre + [c]
 
+    def _need_async_work(self, st, pre):
+        if st.works:
+            return self.rng.choice(st.works)
+        t = self.need_tensor(st, pre)
+        c = {
+            "op": "all_reduce",
+            "args": {"t": t, "op": "SUM", "group": "world", "async_op": True},
+            "rets": {"w": st.fresh("w")},
+            "div": {},
+        }
+        pre.append(c)
+        _apply_state(st, c)
+        return c["rets"]["w"]
+
+    def _need_real_group(self, st, pre):
+        if st.groups and self.rng.random() < 0.7:
+            return self.rng.choice(sorted(st.groups))
+        c = {
+            "op": "new_group",
+            "args": {"ranks": self.value("ranks", st), "local_sync": False},
+            "rets": {"g": st.fresh("g")},
+            "div": {},
+        }
+        pre.append(c)
+        _apply_state(st, c)
+        return c["rets"]["g"]
+
+    def gen_fault_call(self, st: State, op):
+        r = self.rng
+        pre: list[dict] = []
+        a = {}
+        if op in ("drop_work", "wait_twice", "wait_late"):
+            a["w"] = self._need_async_work(st, pre)
+            if op == "drop_work":
+                a["gc"] = r.random() < 0.7
+        elif op in ("destroy_group", "abort_group"):
+            a["group"] = self._need_real_group(st, pre)
+        elif op in ("async_resize", "async_free"):
+            shape = [r.randint(1, 6)] + r.choice([[], [2], [3]])
+            a["t"] = self.need_tensor(st, pre, spec=self.rand_spec(shape, r.choice(["float32", "int64", "int32"])))
+            a["op"] = "SUM"
+            a["group"] = "world" if r.random() < 0.7 else self._need_real_group(st, pre)
+            if op == "async_resize":
+                a["how"] = self.value("resize_how", st)
+        elif op == "batch_mismatch":
+            a["t"] = self.need_tensor(st, pre)
+            a["kind"] = self.value("batch_kind", st)
+        elif op == "crash_rank":
+            a["group"] = "world" if r.random() < 0.6 else self._need_real_group(st, pre)
+            a["victim"] = r.randrange(self.world)
+            a["when"] = self.value("crash_when", st)
+        elif op == "short_timeout_probe":
+            a["group"] = "world" if r.random() < 0.6 else self._need_real_group(st, pre)
+        c = {"op": op, "args": a, "rets": {}, "div": {}}
+        _apply_state(st, c)
+        return [*pre, c]
+
     def generate(self, ncalls=None):
         ncalls = ncalls or self.rng.randint(1, 8)
         p = {"world": self.world, "calls": []}
@@ -319,10 +388,10 @@ def sanitize(p):
 
 
 class Mutator:
-    def __init__(self, world, rng: random.Random, max_calls=24, diverge_weight=6):
+    def __init__(self, world, rng: random.Random, max_calls=24, diverge_weight=6, fault=False):
         self.world = world
         self.rng = rng
-        self.gen = Generator(world, rng)
+        self.gen = Generator(world, rng, fault=fault)
         self.max_calls = max_calls
         self.diverge_weight = diverge_weight
 
