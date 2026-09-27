@@ -1,0 +1,136 @@
+  ..all_reduce done locally
+all_reduce             WRONG ranks [0, 1, 2, 3]; out-of-view writes ranks [0, 1, 2, 3]
+  ..reduce done locally
+reduce                 WRONG ranks [0, 1, 2, 3]; out-of-view writes ranks [0, 1, 2, 3]
+  ..broadcast done locally
+broadcast              WRONG ranks [1, 2, 3]; out-of-view writes ranks []
+  ..all_gather(out) done locally
+all_gather(out)        OK
+  ..all_gather(in) done locally
+all_gather(in)         OK
+  ..scatter(out) done locally
+scatter(out)           WRONG ranks [0, 1, 2, 3]; out-of-view writes ranks [0, 1, 2, 3]
+  ..reduce_scatter(out) done locally
+reduce_scatter(out)    WRONG ranks [0, 1, 2, 3]; out-of-view writes ranks [0, 1, 2, 3]
+  ..all_to_all_single(in) done locally
+all_to_all_single(in)  RAISES {'ValueError: Tensors must be contiguous'}
+  ..send/recv(recv) done locally
+[rank3]: Traceback (most recent call last):
+[rank3]:   File "/repro/repro.py", line 88, in <module>
+[rank3]:     report("send/recv(recv)", v, base(9) if R == 1 else [0.0] * N, b)
+[rank3]:   File "/repro/repro.py", line 29, in report
+[rank3]:     dist.all_gather_object(res, (ok, gaps_ok, str(err[0]) if err[0] else None))
+[rank3]:   File "/usr/local/lib/python3.12/site-packages/torch/distributed/c10d_logger.py", line 83, in wrapper
+[rank3]:     return func(*args, **kwargs)
+[rank3]:            ^^^^^^^^^^^^^^^^^^^^^
+[rank3]:   File "/usr/local/lib/python3.12/site-packages/torch/distributed/distributed_c10d.py", line 4208, in all_gather_object
+[rank3]:     all_gather(object_size_list, local_size, group=group)
+[rank3]:   File "/usr/local/lib/python3.12/site-packages/torch/distributed/c10d_logger.py", line 83, in wrapper
+[rank3]:     return func(*args, **kwargs)
+[rank3]:            ^^^^^^^^^^^^^^^^^^^^^
+[rank3]:   File "/usr/local/lib/python3.12/site-packages/torch/distributed/distributed_c10d.py", line 5055, in all_gather
+[rank3]:     work.wait()
+[rank3]: RuntimeError: [/__w/pytorch/pytorch/third_party/gloo/gloo/transport/tcp/unbound_buffer.cc:129] Timed out waiting 15000ms for send operation to complete
+[rank1]: Traceback (most recent call last):
+[rank1]:   File "/repro/repro.py", line 88, in <module>
+[rank1]:     report("send/recv(recv)", v, base(9) if R == 1 else [0.0] * N, b)
+[rank1]:   File "/repro/repro.py", line 29, in report
+[rank1]:     dist.all_gather_object(res, (ok, gaps_ok, str(err[0]) if err[0] else None))
+[rank1]:   File "/usr/local/lib/python3.12/site-packages/torch/distributed/c10d_logger.py", line 83, in wrapper
+[rank1]:     return func(*args, **kwargs)
+[rank1]:            ^^^^^^^^^^^^^^^^^^^^^
+[rank1]:   File "/usr/local/lib/python3.12/site-packages/torch/distributed/distributed_c10d.py", line 4208, in all_gather_object
+[rank1]:     all_gather(object_size_list, local_size, group=group)
+[rank1]:   File "/usr/local/lib/python3.12/site-packages/torch/distributed/c10d_logger.py", line 83, in wrapper
+[rank1]:     return func(*args, **kwargs)
+[rank1]:            ^^^^^^^^^^^^^^^^^^^^^
+[rank1]:   File "/usr/local/lib/python3.12/site-packages/torch/distributed/distributed_c10d.py", line 5055, in all_gather
+[rank1]:     work.wait()
+[rank1]: RuntimeError: [/__w/pytorch/pytorch/third_party/gloo/gloo/transport/tcp/unbound_buffer.cc:78] Timed out waiting 15000ms for recv operation to complete
+[rank2]: Traceback (most recent call last):
+[rank2]:   File "/repro/repro.py", line 88, in <module>
+[rank2]:     report("send/recv(recv)", v, base(9) if R == 1 else [0.0] * N, b)
+[rank2]:   File "/repro/repro.py", line 29, in report
+[rank2]:     dist.all_gather_object(res, (ok, gaps_ok, str(err[0]) if err[0] else None))
+[rank2]:   File "/usr/local/lib/python3.12/site-packages/torch/distributed/c10d_logger.py", line 83, in wrapper
+[rank2]:     return func(*args, **kwargs)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/usr/local/lib/python3.12/site-packages/torch/distributed/distributed_c10d.py", line 4208, in all_gather_object
+[rank2]:     all_gather(object_size_list, local_size, group=group)
+[rank2]:   File "/usr/local/lib/python3.12/site-packages/torch/distributed/c10d_logger.py", line 83, in wrapper
+[rank2]:     return func(*args, **kwargs)
+[rank2]:            ^^^^^^^^^^^^^^^^^^^^^
+[rank2]:   File "/usr/local/lib/python3.12/site-packages/torch/distributed/distributed_c10d.py", line 5055, in all_gather
+[rank2]:     work.wait()
+[rank2]: RuntimeError: [/__w/pytorch/pytorch/third_party/gloo/gloo/transport/tcp/unbound_buffer.cc:129] Timed out waiting 15000ms for send operation to complete
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/repro/repro.py", line 88, in <module>
+[rank0]:     report("send/recv(recv)", v, base(9) if R == 1 else [0.0] * N, b)
+[rank0]:   File "/repro/repro.py", line 29, in report
+[rank0]:     dist.all_gather_object(res, (ok, gaps_ok, str(err[0]) if err[0] else None))
+[rank0]:   File "/usr/local/lib/python3.12/site-packages/torch/distributed/c10d_logger.py", line 83, in wrapper
+[rank0]:     return func(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/usr/local/lib/python3.12/site-packages/torch/distributed/distributed_c10d.py", line 4208, in all_gather_object
+[rank0]:     all_gather(object_size_list, local_size, group=group)
+[rank0]:   File "/usr/local/lib/python3.12/site-packages/torch/distributed/c10d_logger.py", line 83, in wrapper
+[rank0]:     return func(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/usr/local/lib/python3.12/site-packages/torch/distributed/distributed_c10d.py", line 5055, in all_gather
+[rank0]:     work.wait()
+[rank0]: RuntimeError: Application timeout caused pair closure
+W0927 01:26:08.555000 7 site-packages/torch/distributed/elastic/multiprocessing/api.py:1028] Sending process 9 closing signal SIGTERM
+W0927 01:26:08.588000 7 site-packages/torch/distributed/elastic/multiprocessing/api.py:1028] Sending process 12 closing signal SIGTERM
+E0927 01:26:08.611000 7 site-packages/torch/distributed/elastic/multiprocessing/api.py:1002] failed (exitcode: 1) local_rank: 1 (pid: 10) of binary: /usr/local/bin/python3.12
+Traceback (most recent call last):
+  File "/usr/local/bin/torchrun", line 8, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 380, in wrapper
+    return f(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/distributed/run.py", line 1138, in main
+    run(args)
+  File "/usr/local/lib/python3.12/site-packages/torch/distributed/run.py", line 1129, in run
+    elastic_launch(
+  File "/usr/local/lib/python3.12/site-packages/torch/distributed/launcher/api.py", line 197, in __call__
+    return launch_agent(
+           ^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/distributed/launcher/api.py", line 386, in launch_agent
+    raise ChildFailedError(
+torch.distributed.elastic.multiprocessing.errors.ChildFailedError: 
+============================================================
+repro.py FAILED
+------------------------------------------------------------
+Failures:
+[1]:
+  time      : 2026-09-27_01:26:08
+  host      : localhost
+  rank      : 2 (local_rank: 2)
+  exitcode  : 1 (pid: 11) 
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+[2]:
+  time      : 2026-09-27_01:26:08
+  host      : localhost
+  rank      : 0 (local_rank: 0)
+  exitcode  : -15 (pid: 9)  (SIGTERM)
+  error_file: <N/A>
+  traceback : Signal 15 (SIGTERM) received by PID 9
+[3]:
+  time      : 2026-09-27_01:26:08
+  host      : localhost
+  rank      : 3 (local_rank: 3)
+  exitcode  : -15 (pid: 12)  (SIGTERM)
+  error_file: <N/A>
+  traceback : Signal 15 (SIGTERM) received by PID 12
+------------------------------------------------------------
+Root Cause (first observed failure):
+[0]:
+  time      : 2026-09-27_01:26:08
+  host      : localhost
+  rank      : 1 (local_rank: 1)
+  exitcode  : 1 (pid: 10) 
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+============================================================

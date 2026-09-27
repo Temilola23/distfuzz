@@ -1,0 +1,152 @@
+{
+ "sig": "WRONG_RESULT|all_reduce|torch.int64",
+ "kind": "WRONG_RESULT",
+ "count": 1,
+ "first_t": 1218.2908821105957,
+ "first_exec": 2551,
+ "id": "79af2e8047",
+ "detail": "mismatch on [(0, 't5'), (1, 't5'), (2, 't5'), (3, 't5')]",
+ "info": {
+  "ref": "valid",
+  "ref_at": null,
+  "ref_why": "",
+  "racy": false,
+  "exc": 0,
+  "timeouts": 0,
+  "detail_mismatch": 0
+ },
+ "prog": {
+  "world": 4,
+  "calls": [
+   {
+    "op": "tensor",
+    "args": {
+     "spec": {
+      "dtype": "float32",
+      "shape": [
+       1
+      ],
+      "layout": "contig",
+      "seed": 507,
+      "kind": "int"
+     }
+    },
+    "rets": {
+     "out": "t1"
+    },
+    "div": {
+     "0": {
+      "spec": {
+       "dtype": "float32",
+       "shape": [
+        1
+       ],
+       "layout": "contig",
+       "seed": 14,
+       "kind": "int"
+      }
+     }
+    }
+   },
+   {
+    "op": "all_reduce",
+    "args": {
+     "group": "world",
+     "t": "t1",
+     "op": "SUM",
+     "async_op": false
+    },
+    "rets": {},
+    "div": {}
+   },
+   {
+    "op": "new_subgroups",
+    "args": {
+     "size": 2
+    },
+    "rets": {
+     "g": "g3"
+    },
+    "div": {}
+   },
+   {
+    "op": "tensor",
+    "args": {
+     "spec": {
+      "dtype": "int64",
+      "shape": [
+       3,
+       2
+      ],
+      "layout": "contig",
+      "seed": 116,
+      "kind": "int"
+     }
+    },
+    "rets": {
+     "out": "t5"
+    },
+    "div": {
+     "0": {
+      "spec": {
+       "dtype": "int64",
+       "shape": [
+        3,
+        2
+       ],
+       "layout": "noncontig",
+       "seed": 116,
+       "kind": "int"
+      }
+     }
+    }
+   },
+   {
+    "op": "all_reduce",
+    "args": {
+     "group": "world",
+     "t": "t5",
+     "op": "SUM",
+     "async_op": true
+    },
+    "rets": {
+     "w": "w6"
+    },
+    "div": {}
+   },
+   {
+    "op": "all_to_all_single",
+    "args": {
+     "group": "g3",
+     "inspec": {
+      "dtype": "float32",
+      "shape": [
+       2
+      ],
+      "layout": "contig",
+      "seed": 539,
+      "kind": "int"
+     },
+     "matrix": [
+      [
+       3,
+       2
+      ],
+      [
+       3,
+       1
+      ]
+     ],
+     "even": true,
+     "async_op": false
+    },
+    "rets": {
+     "out": "t8",
+     "in": "t9"
+    },
+    "div": {}
+   }
+  ]
+ },
+ "kind_exec": "ok"
+}

@@ -1,0 +1,67 @@
+[rank 3] raised RuntimeError: min(): Expected reduction dim to be specified for input.numel() == 0. Specify the reduction dim with the 'dim' argument.
+[rank 2] raised RuntimeError: [/__w/pytorch/pytorch/third_party/gloo/gloo/transport/tcp/pair.cc:561] Connection closed by peer [127.0.0.1]:11138. This is typically caused by a remote worker crashing. Check the logs of the remote worker before reporting an error. GLHF! 🏖️
+Traceback (most recent call last):
+  File "/repro/repro.py", line 132, in main
+    run("dist")
+  File "/repro/repro.py", line 105, in run
+    program()
+  File "/repro/repro.py", line 73, in program
+    v6 = v4.min()
+         ^^^^^^^^
+RuntimeError: min(): Expected reduction dim to be specified for input.numel() == 0. Specify the reduction dim with the 'dim' argument.
+Traceback (most recent call last):
+  File "/repro/repro.py", line 132, in main
+    run("dist")
+  File "/repro/repro.py", line 105, in run
+    program()
+  File "/repro/repro.py", line 74, in program
+    check('v6', v6)
+  File "/repro/repro.py", line 90, in check
+    full = x.full_tensor() if isinstance(x, DTensor) else x
+           ^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/distributed/tensor/_api.py", line 856, in full_tensor
+    redist_res = self.redistribute(
+                 ^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/distributed/tensor/_api.py", line 813, in redistribute
+    return Redistribute.apply(
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/distributed/tensor/_redistribute.py", line 1993, in forward
+    output = redistribute_local_tensor(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/distributed/tensor/_redistribute.py", line 1841, in redistribute_local_tensor
+    new_local_tensor = new_local_tensor.wait()
+                       ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/distributed/_functional_collectives.py", line 1126, in wait
+    return wait_tensor(self.elem)
+           ^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/distributed/_functional_collectives.py", line 142, in wait_tensor
+    return torch.ops._c10d_functional.wait_tensor(tensor)  # type: ignore[attr-defined]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/_ops.py", line 1350, in __call__
+    return self._op(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/_library/autograd.py", line 147, in autograd_impl
+    result = redispatch_no_grad(keyset, args, keyword_only_args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/_library/autograd.py", line 43, in redispatch_no_grad
+    result = op.redispatch(keyset & _C._after_autograd_keyset, *args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/_ops.py", line 926, in redispatch
+    return self._handle.redispatch_boxed(keyset, *args, **kwargs)  # type: ignore[return-value]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: [/__w/pytorch/pytorch/third_party/gloo/gloo/transport/tcp/pair.cc:561] Connection closed by peer [127.0.0.1]:11138. This is typically caused by a remote worker crashing. Check the logs of the remote worker before reporting an error. GLHF! 🏖️
+W0927 01:27:24.399000 7 site-packages/torch/multiprocessing/spawn.py:165] Terminating process 9 via signal SIGTERM
+W0927 01:27:24.465000 7 site-packages/torch/multiprocessing/spawn.py:165] Terminating process 10 via signal SIGTERM
+W0927 01:27:24.465000 7 site-packages/torch/multiprocessing/spawn.py:165] Terminating process 11 via signal SIGTERM
+Traceback (most recent call last):
+  File "/repro/repro.py", line 147, in <module>
+    mp.spawn(main, args=(port,), nprocs=WORLD, join=True)
+  File "/usr/local/lib/python3.12/site-packages/torch/multiprocessing/spawn.py", line 340, in spawn
+    return start_processes(fn, args, nprocs, join, daemon, start_method="spawn")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/multiprocessing/spawn.py", line 296, in start_processes
+    while not context.join():
+              ^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/multiprocessing/spawn.py", line 200, in join
+    raise ProcessExitedException(
+torch.multiprocessing.spawn.ProcessExitedException: process 3 terminated with exit code 1

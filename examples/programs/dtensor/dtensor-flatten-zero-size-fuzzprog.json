@@ -1,0 +1,36 @@
+{
+ "sig": "HANG||program timeout",
+ "prog": {
+  "mesh": "1d",
+  "inputs": [
+   {
+    "shape": [
+     0,
+     7,
+     4,
+     4
+    ],
+    "dtype": "bf16",
+    "seed": 31216397,
+    "rg": false,
+    "pl": [
+     "R"
+    ]
+   }
+  ],
+  "steps": [
+   {
+    "out": "v0",
+    "expr": "mk(0)"
+   },
+   {
+    "out": "v1",
+    "expr": "v0.flatten()"
+   }
+  ],
+  "nv": 5,
+  "grad": false,
+  "id": 84
+ },
+ "world": 4
+}

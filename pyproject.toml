@@ -18,6 +18,9 @@ dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.7"]
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"distfuzz.repro" = ["Dockerfile.torch"]
+
 [tool.ruff]
 line-length = 120
 target-version = "py310"
@@ -27,6 +30,10 @@ src = ["src", "tests"]
 select = ["E", "W", "F", "I", "B", "UP", "C4", "PIE"]
 # dict(k=v) reads better for records; zip(strict=) would change behavior on ragged inputs
 ignore = ["C408", "B905"]
+
+[tool.ruff.lint.per-file-ignores]
+# emitted repro source and report HTML are string templates
+"src/distfuzz/repro/{gen_distfuzz,gen_dtensor,render}.py" = ["E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,0 +1,54 @@
+{
+ "sig": "MISMATCH|fill_|values",
+ "prog": {
+  "mesh": "1d",
+  "inputs": [
+   {
+    "shape": [
+     1,
+     8
+    ],
+    "dtype": "f32",
+    "seed": 15143240,
+    "rg": false,
+    "pl": [
+     "S1"
+    ]
+   },
+   {
+    "shape": [
+     8,
+     2
+    ],
+    "dtype": "f32",
+    "seed": 963229068,
+    "rg": false,
+    "pl": [
+     "R"
+    ]
+   }
+  ],
+  "steps": [
+   {
+    "out": "v1",
+    "expr": "mk(0)"
+   },
+   {
+    "out": "v5",
+    "expr": "mk(1)"
+   },
+   {
+    "out": "v7",
+    "expr": "torch.einsum('ij,jk->ik', v1, v5)"
+   },
+   {
+    "out": "v11",
+    "expr": "v7.fill_(3)"
+   }
+  ],
+  "nv": 21,
+  "grad": true,
+  "id": 352
+ },
+ "world": 4
+}

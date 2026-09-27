@@ -1,0 +1,37 @@
+{
+ "sig": "MISMATCH|vector_norm|values",
+ "prog": {
+  "mesh": "1d",
+  "inputs": [
+   {
+    "shape": [
+     3,
+     4,
+     2,
+     2,
+     2
+    ],
+    "dtype": "f32",
+    "seed": 831598492,
+    "rg": false,
+    "pl": [
+     "P:max"
+    ]
+   }
+  ],
+  "steps": [
+   {
+    "out": "v15",
+    "expr": "mk(0)"
+   },
+   {
+    "out": "v17",
+    "expr": "torch.linalg.vector_norm(v15, ord=float('inf'), dim=2)"
+   }
+  ],
+  "nv": 22,
+  "grad": false,
+  "id": 1416
+ },
+ "world": 4
+}

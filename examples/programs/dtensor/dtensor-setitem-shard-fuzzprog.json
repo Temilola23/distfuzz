@@ -1,0 +1,43 @@
+{
+ "sig": "MISMATCH|SETITEM(v10, 0, 5)|values",
+ "prog": {
+  "mesh": "1d",
+  "inputs": [
+   {
+    "shape": [],
+    "dtype": "bf16",
+    "seed": 652953055,
+    "rg": false,
+    "pl": [
+     "R"
+    ]
+   }
+  ],
+  "steps": [
+   {
+    "out": "v0",
+    "expr": "mk(0)"
+   },
+   {
+    "out": "v1",
+    "expr": "v0[None]"
+   },
+   {
+    "out": "v6",
+    "expr": "v0 - v1"
+   },
+   {
+    "out": "v10",
+    "expr": "R(v6, ['S0'])"
+   },
+   {
+    "out": "v11",
+    "expr": "SETITEM(v10, 0, 5)"
+   }
+  ],
+  "nv": 16,
+  "grad": true,
+  "id": 44
+ },
+ "world": 4
+}
