@@ -6,6 +6,11 @@ Plain PyTorch scripts, no distfuzz imports. Run them in the Docker image (`make 
 |---|---|---|
 | Gloo `all_reduce` on a strided view: wrong on every rank | `collectives/gloo_strided_allreduce.py` | `torchrun --nproc-per-node 4 gloo_strided_allreduce.py` |
 | Gloo strided views across all collectives, with out-of-view writes | `collectives/gloo_strided_sweep.py` | `torchrun --nproc-per-node 4 gloo_strided_sweep.py` |
+| Gloo: `set_` or `resize_` on a tensor during an async collective aborts the process (uncatchable SIGABRT) | `faults/inflight_set_abort.py` | `python inflight_set_abort.py 4 200 set_` |
+| Same, per layout (contiguous, transposed, strided), showing it is independent of the strided bug | `faults/inflight_resize_layouts.py` | `python inflight_resize_layouts.py contig grow` |
+| Same class via `set_(empty)` + `del` (rarely crashes alone; the fuzzer needed prior state) | `faults/inflight_free.py` | `python inflight_free.py` |
+| Control: a fresh 2-rank size mismatch raises cleanly | `faults/size_mismatch.py` | `python size_mismatch.py` |
+| TCPStore key-race stress test (no crash found so far) | `faults/tcpstore_race.py` | `python tcpstore_race.py 60 8` |
 | DTensor A1 `__setitem__` dropped | `dtensor/cases.py` | `python cases.py setitem_shard` |
 | DTensor A2 `fill_` on `Partial(sum)` (by design upstream) | `dtensor/cases.py` | `python cases.py fill_partial` |
 | DTensor A3 loss functions under uneven shards | `dtensor/cases.py` | `python cases.py mse_loss_uneven 2`, `python cases.py loss_uneven_mixed` |

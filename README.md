@@ -15,9 +15,10 @@ Each fuzzer is differential. It runs the same program twice, once through the di
 | Package | Target | Oracle |
 |---|---|---|
 | `distfuzz.collectives` | c10d collectives and p2p on Gloo (22 calls described), with per-rank divergence | A single-process model of all ranks predicts every tensor on every rank. Sentinel cells around each buffer catch writes outside a view. Also: crash, hang, error on a valid program, silent acceptance of an invalid one. |
+| `distfuzz.collectives --fault` | Lifecycle and fault ops on top of the above: drop a `Work` before `wait()`, wait twice, destroy or abort a group, resize or free a tensor while an async collective uses it, SIGKILL a rank mid-collective | Crash and hang oracles only. A rank the program kills on purpose is expected to die; a surviving rank that dies with SIGSEGV or SIGABRT is a finding. Crash findings keep the programs that ran before them, and `replay` trims that history. |
 | `distfuzz.dtensor` | DTensor ops (about 150 templates, Shard/Replicate/Partial on 1-D and 2-D meshes, autograd, `torch.compile`) | `full_tensor()` must equal the same program on plain tensors; also shapes, local shard shapes, gradients, and whether all ranks raise the same error. |
 | `distfuzz.dcp` | `torch.distributed.checkpoint` save/load and `get_state_dict`/`set_state_dict` across FSDP2, TP, HSDP, DDP and 2-D meshes | Checkpoints are reloaded into a poisoned model under a different world size and parallelism; loaded state must match saved state bitwise, and training must match an unsharded reference. |
-| `distfuzz.repro` | Any finding or repro script | syzbot-style bundle: reliability over N fresh containers, bisection across 12 torch releases, pinned Dockerfile, report, dashboard. |
+| `distfuzz.repro` | Any finding or repro script | syzbot-style bundle: reliability over N fresh containers, bisection across 11 releases (2.4.1 to 2.14.0) and a pinned nightly, pinned Dockerfile, report, dashboard. |
 
 ## How it maps to syzkaller
 
@@ -63,13 +64,22 @@ docker run --rm -it --memory 3g --cpus 4 --shm-size 1g -v "$PWD/runs:/src/runs" 
 # inside the container
 python -m distfuzz.collectives fuzz --mode random --minutes 5 --out runs/collectives
 python -m distfuzz.collectives minimize runs/collectives/findings/<id>.json
+python -m distfuzz.collectives fuzz --fault --minutes 5 --out runs/faults
 python -m distfuzz.dtensor fuzz --mode guided --world 4 --minutes 5 --out runs/dtensor
 python -m distfuzz.dcp fuzz --mode guided --minutes 5 --out runs/dcp
 
 torchrun --nproc-per-node 4 examples/repros/collectives/gloo_strided_sweep.py
 ```
 
-Another torch build: `docker build --build-arg TORCH_SPEC=torch --build-arg TORCH_INDEX=https://download.pytorch.org/whl/nightly/cpu -t distfuzz:nightly .`
+`distfuzz.repro` runs on the host and starts its own containers (one pinned image per torch release):
+
+```bash
+python -m distfuzz.repro images --only 2.14.0
+python -m distfuzz.repro bundle examples/repros/dtensor/cases.py::setitem_shard --name setitem --n 5 --no-bisect
+python -m distfuzz.repro specs examples/repro_specs.json --jobs 2   # rebuild every bundle: 20-run reliability, release bisection
+```
+
+Another torch build for the fuzzers: `docker build --build-arg TORCH_SPEC=torch --build-arg TORCH_INDEX=https://download.pytorch.org/whl/nightly/cpu -t distfuzz:nightly .`
 
 Host-only development (no ranks): see [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -127,6 +137,7 @@ src/distfuzz/
   repro/         repro bundles, reliability, release bisection
 tests/           host tests; multi-rank tests are marked `multirank`
 examples/repros/ plain PyTorch repros for the bugs above
+examples/programs/ fuzzer programs behind the repro bundles
 docs/            PR guide
 ```
 
