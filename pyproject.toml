@@ -25,6 +25,8 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "B", "UP", "C4", "PIE"]
+# dict(k=v) reads better for records; zip(strict=) would change behavior on ragged inputs
+ignore = ["C408", "B905"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
