@@ -36,9 +36,11 @@ class CxxCoverage:
         self.take()  # drop what process start-up and init_process_group executed
 
     def take(self) -> set[int]:
-        s = features(self.counts)
+        # Gloo's background threads keep counting while we read, so work on a copy; hits that land between the
+        # copy and the reset are lost, which only adds to the noise triage already deals with
+        snap = self.counts.copy()
         self.lib.dfcov_reset()
-        return s
+        return features(snap)
 
 
 def available(lib: str = LIB) -> bool:

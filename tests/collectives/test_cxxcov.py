@@ -14,13 +14,30 @@ SRC = Path(__file__).resolve().parents[2] / "docker" / "cov" / "dfcov.c"
 CC = shutil.which("cc") or shutil.which("clang") or shutil.which("gcc")
 
 
+HAMMER = r"""
+#include <pthread.h>
+#include <stdint.h>
+void __sanitizer_cov_trace_pc_guard(uint32_t *guard);
+static uint32_t *g; static uint32_t n; static volatile int stop;
+static void *loop(void *arg) {
+    (void)arg;
+    for (uint64_t i = 0; !stop; i++) __sanitizer_cov_trace_pc_guard(&g[(i * 2654435761u) % n]);
+    return 0;
+}
+static pthread_t t;
+void hammer_start(uint32_t *guards, uint32_t count) { g = guards; n = count; stop = 0; pthread_create(&t, 0, loop, 0); }
+void hammer_stop(void) { stop = 1; pthread_join(t, 0); }
+"""
+
+
 @pytest.fixture
 def runtime(tmp_path):
     """A fresh copy of the real runtime: its counters are process-wide statics, so each test gets its own."""
     if CC is None:
         pytest.skip("no C compiler")
     so = tmp_path / ("libdfcov.dylib" if sys.platform == "darwin" else "libdfcov.so")
-    subprocess.run([CC, "-O2", "-fPIC", "-shared", str(SRC), "-o", str(so)], check=True)
+    (tmp_path / "hammer.c").write_text(HAMMER)
+    subprocess.run([CC, "-O2", "-fPIC", "-shared", str(SRC), str(tmp_path / "hammer.c"), "-o", str(so)], check=True)
     lib = ctypes.CDLL(str(so))
     lib.dfcov_edges.restype = ctypes.c_uint32
     return so, lib
@@ -122,3 +139,18 @@ def test_signals(coverage, expected):
 def test_unknown_signal_is_rejected():
     with pytest.raises(ValueError):
         signals("python")
+
+
+def test_take_is_safe_while_another_thread_is_counting(runtime):
+    """Regression: features() ran np.flatnonzero on the live map; Gloo's background threads changed it under
+    numpy, which raised and killed the rank (false CRASH findings)."""
+    so, lib = runtime
+    g = guards(1 << 18)
+    init(lib, g)
+    cov = cxxcov.CxxCoverage(str(so))
+    lib.hammer_start(g, ctypes.c_uint32(len(g)))
+    try:
+        for _ in range(300):
+            cov.take()
+    finally:
+        lib.hammer_stop()
