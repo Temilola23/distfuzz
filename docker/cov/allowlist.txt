@@ -1,0 +1,3 @@
+src:*/third_party/gloo/gloo/*
+src:*/torch/csrc/distributed/c10d/*
+fun:*

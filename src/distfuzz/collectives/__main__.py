@@ -3,7 +3,7 @@ import json
 import os
 import time
 
-from .executor import TIMEOUT
+from .executor import SIGNALS, TIMEOUT
 
 
 def main():
@@ -17,6 +17,12 @@ def main():
     f.add_argument("--seed", type=int, default=0)
     f.add_argument("--detail", action="store_true")
     f.add_argument("--fault", action="store_true", help="also generate fault and lifecycle ops")
+    f.add_argument(
+        "--signal",
+        choices=SIGNALS,
+        default="py",
+        help="coverage that admits programs to the corpus in guided mode; cxx needs the distfuzz:cov image",
+    )
     f.add_argument("--out", required=True)
     b = sub.add_parser("bench")
     b.add_argument("--n", type=int, default=40)
@@ -38,7 +44,16 @@ def main():
     if a.cmd == "fuzz":
         from .fuzzer import Fuzzer
 
-        fz = Fuzzer(a.out, mode=a.mode, world=a.world, timeout=a.timeout, detail=a.detail, seed=a.seed, fault=a.fault)
+        fz = Fuzzer(
+            a.out,
+            mode=a.mode,
+            world=a.world,
+            timeout=a.timeout,
+            detail=a.detail,
+            seed=a.seed,
+            fault=a.fault,
+            signal=a.signal,
+        )
         print(json.dumps(fz.run(a.minutes * 60)))
     elif a.cmd == "bench":
         import random

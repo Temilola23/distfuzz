@@ -9,7 +9,19 @@ from collections import deque
 
 from .executor import TIMEOUT, Session
 from .oracle import classify
-from .prog import Generator, Mutator, dumps, has_divergence
+from .prog import Generator, Mutator, dumps, has_divergence, sanitize
+
+# a program with no collective: what it covers is the harness, not the program
+NOOP_CALLS = {
+    "calls": [
+        {
+            "op": "tensor",
+            "args": {"spec": {"dtype": "float32", "shape": [4], "layout": "contig", "seed": 1, "kind": "int"}},
+            "rets": {"out": "t1"},
+            "div": {},
+        }
+    ],
+}
 
 
 class Fuzzer:
@@ -24,9 +36,15 @@ class Fuzzer:
         gen_prob=0.1,
         diverge_weight=6,
         fault=False,
+        signal="py",
+        triage_runs=2,
     ):
         self.outdir = outdir
         self.mode = mode
+        self.signal = signal
+        # re-running for stability only means something for C++ counters (see triage_new)
+        self.triage = mode == "guided" and "cxx" in signal
+        self.triage_runs = triage_runs
         os.makedirs(os.path.join(outdir, "findings"), exist_ok=True)
         os.makedirs(os.path.join(outdir, "corpus"), exist_ok=True)
         os.makedirs(os.path.join(outdir, "logs"), exist_ok=True)
@@ -35,11 +53,13 @@ class Fuzzer:
         self.fault = fault
         self.gen = Generator(world, self.rng, fault=fault)
         self.mut = Mutator(world, self.rng, diverge_weight=diverge_weight, fault=fault)
-        self.sess = Session(world, timeout=timeout, detail=detail, coverage=True, logdir=os.path.join(outdir, "logs"))
+        self.sess = Session(world, timeout=timeout, detail=detail, coverage=signal, logdir=os.path.join(outdir, "logs"))
         # fault programs mutate poorly (a crashing prefix keeps crashing), so generate more often
         self.gen_prob = max(gen_prob, 0.35) if fault else gen_prob
         self.cover = set()
+        self.ignore = set()
         self.corpus = []
+        self.saved = 0
         self.findings = {}
         self.stats = dict(
             execs=0,
@@ -57,6 +77,9 @@ class Fuzzer:
             restarts=0,
             checked=0,
             oom=0,
+            noise=0,
+            unstable=0,
+            triage_removed=0,
             wall_exec=0.0,
         )
         self.t0 = None
@@ -96,10 +119,27 @@ class Fuzzer:
         for r in res["results"]:
             if r and r.get("cov"):
                 new |= r["cov"] - self.cover
-        return new
+        return new - self.ignore
 
-    def step(self):
-        prog = self.pick()
+    def calibrate(self, settle=5, limit=60):
+        """Ignore the C++ features the harness produces on its own (background threads, per-program group setup).
+
+        Runs a program with no collective until its feature union stops growing for `settle` runs in a row.
+        """
+        noise, quiet = set(), 0
+        for _ in range(limit):
+            res = self.sess.run({**NOOP_CALLS, "world": self.world})
+            if res["kind"] == "ok":
+                got = set().union(*(r.get("cov", set()) for r in res["results"] if r))
+                quiet = quiet + 1 if got <= noise else 0
+                noise |= got
+            if quiet >= settle:
+                break
+        self.ignore |= {f for f in noise if isinstance(f, int)}
+        self.stats["noise"] = len(self.ignore)
+
+    def execute(self, prog):
+        """Run one program, classify it, record findings and stats; return the result and its new coverage."""
         t = time.time()
         self.history.append(prog)
         res = self.sess.run(prog)
@@ -115,8 +155,6 @@ class Fuzzer:
         self.stats["oom" if info.get("oom") else res["kind"]] += 1
         if has_divergence(prog):
             self.stats["divergent"] += 1
-        new = self.new_cover(res) if res["kind"] == "ok" else set()
-        self.cover |= new
         ref = info.get("ref")
         if ref in ("valid", "invalid", "uncertain"):
             self.stats[ref] += 1
@@ -129,16 +167,62 @@ class Fuzzer:
             self.record_finding(f, prog, res, info)
         if res["kind"] != "ok":
             self.history.clear()
-        if self.mode == "guided" and new:
+        return res, (self.new_cover(res) if res["kind"] == "ok" else set())
+
+    def step(self):
+        prog = self.pick()
+        _, new = self.execute(prog)
+        if not new:
+            return
+        if self.triage:
+            prog, new = self.triage_new(prog, new)
+            if not new:
+                return
+        self.cover |= new
+        # every coverage-raising program is saved, so coverage can be re-measured the same way for every mode;
+        # only guided mode mutates them
+        self.saved += 1
+        with open(os.path.join(self.outdir, "corpus", f"{self.saved:05d}.json"), "w") as fh:
+            fh.write(dumps(prog))
+        if self.mode == "guided":
             self.corpus.append(prog)
-            with open(os.path.join(self.outdir, "corpus", f"{len(self.corpus):05d}.json"), "w") as fh:
-                fh.write(dumps(prog))
+
+    def covered(self, prog):
+        res, _ = self.execute(prog)
+        if res["kind"] != "ok":
+            return set()
+        return set().union(*(r.get("cov", set()) for r in res["results"] if r))
+
+    def triage_new(self, prog, new):
+        """Keep the C++ features of `new` that every re-run reproduces, then drop calls they do not need.
+
+        Python line coverage fires once per rank process, so it cannot be re-checked and is kept as is.
+        """
+        py = {f for f in new if not isinstance(f, int)}
+        stable = new - py
+        for _ in range(self.triage_runs):
+            if not stable:
+                break
+            stable &= self.covered(prog)
+        flaky = new - py - stable
+        self.ignore |= flaky  # don't pay to re-check them next time
+        self.stats["unstable"] += len(flaky)
+        if stable:
+            i = len(prog["calls"]) - 1
+            while i >= 0 and len(prog["calls"]) > 1:
+                cand = sanitize({**prog, "calls": prog["calls"][:i] + prog["calls"][i + 1 :]})
+                if cand["calls"] and stable <= self.covered(cand):
+                    self.stats["triage_removed"] += len(prog["calls"]) - len(cand["calls"])
+                    prog = cand
+                i = min(i - 1, len(prog["calls"]) - 1)
+        return prog, stable | py
 
     def snapshot(self):
         s = dict(
             self.stats,
             t=round(time.time() - self.t0, 1),
             cover=len(self.cover),
+            cover_cxx=sum(isinstance(f, int) for f in self.cover),
             corpus=len(self.corpus),
             findings=len(self.findings),
             restarts=self.sess.restarts,
@@ -150,6 +234,8 @@ class Fuzzer:
     def run(self, seconds, report_every=30):
         self.t0 = time.time()
         self.sess.start()
+        if "cxx" in self.signal:
+            self.calibrate()
         last = self.t0
         try:
             while time.time() - self.t0 < seconds:
@@ -171,6 +257,7 @@ class Fuzzer:
                     dict(
                         final=final,
                         mode=self.mode,
+                        signal=self.signal,
                         findings=[{k: v for k, v in r.items() if k != "info"} for r in self.findings.values()],
                     ),
                     fh,

@@ -1,0 +1,64 @@
+# PyTorch built from source with SanitizerCoverage edge counters in Gloo and c10d only.
+#
+#   docker build -f docker/Dockerfile.cov -t distfuzz:cov .
+#
+# Needs about 20 GB of memory for the build with MAX_JOBS=8 and takes 1-2 hours on 8 cores.
+# -fno-sanitize-link-runtime keeps clang's own coverage runtime (weak copies of the same hooks) out.
+# PyTorch links against a stub with the two SanitizerCoverage hooks; the real runtime (docker/cov/dfcov.c) is
+# built in its own stage, so changing it does not rebuild PyTorch.
+
+FROM python:3.12-slim-trixie AS toolchain
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends clang-22 clang-tools-22 libomp-22-dev lld-22 git cmake ninja-build ccache ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+FROM toolchain AS runtime
+COPY docker/cov/dfcov.c /cov/dfcov.c
+RUN clang-22 -O2 -fPIC -shared /cov/dfcov.c -o /cov/libdfcov.so
+
+FROM toolchain AS build
+
+ARG TORCH_REF=v2.14.0
+ARG MAX_JOBS=8
+
+RUN git clone --depth 1 --branch "${TORCH_REF}" --recurse-submodules --shallow-submodules --jobs 8 \
+      https://github.com/pytorch/pytorch /pytorch
+WORKDIR /pytorch
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY docker/cov/allowlist.txt /cov/allowlist.txt
+RUN printf 'void __sanitizer_cov_trace_pc_guard_init(unsigned *a, unsigned *b) {}\nvoid __sanitizer_cov_trace_pc_guard(unsigned *g) {}\n' > /cov/stub.c \
+ && clang-22 -O2 -fPIC -shared /cov/stub.c -o /usr/local/lib/libdfcov.so && ldconfig
+
+ENV CC=clang-22 CXX=clang++-22 \
+    CMAKE_C_COMPILER_LAUNCHER=ccache CMAKE_CXX_COMPILER_LAUNCHER=ccache \
+    CFLAGS="-fsanitize-coverage=trace-pc-guard -fsanitize-coverage-allowlist=/cov/allowlist.txt -fno-sanitize-link-runtime" \
+    CXXFLAGS="-fsanitize-coverage=trace-pc-guard -fsanitize-coverage-allowlist=/cov/allowlist.txt -fno-sanitize-link-runtime" \
+    LDFLAGS="-L/usr/local/lib -Wl,--no-as-needed -ldfcov -Wl,--as-needed" \
+    USE_CUDA=0 USE_ROCM=0 USE_XPU=0 USE_MPS=0 USE_DISTRIBUTED=1 USE_GLOO=1 USE_MPI=0 \
+    USE_MKLDNN=0 USE_FBGEMM=0 USE_KINETO=0 USE_NNPACK=0 USE_XNNPACK=0 USE_QNNPACK=0 USE_PYTORCH_QNNPACK=0 \
+    BUILD_TEST=0 MAX_JOBS=${MAX_JOBS}
+
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    pip wheel --no-build-isolation --no-deps -w /dist .
+
+FROM python:3.12-slim-trixie
+
+COPY --from=runtime /cov/libdfcov.so /usr/local/lib/libdfcov.so
+COPY --from=build /dist/*.whl /tmp/
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libomp5 libatomic1 \
+ && rm -rf /var/lib/apt/lists/* \
+ && ldconfig \
+ && pip install --no-cache-dir /tmp/*.whl safetensors numpy \
+ && rm /tmp/*.whl
+
+WORKDIR /src
+COPY pyproject.toml README.md ./
+COPY src src
+RUN pip install --no-cache-dir -e ".[dev]"
+COPY . .
+RUN python -c "from distfuzz.collectives import cxxcov; import torch; c = cxxcov.CxxCoverage(); print('instrumented edges:', c.n)"
+
+ENV DISTFUZZ_MULTIRANK=1 PYTHONUNBUFFERED=1
+CMD ["python", "-m", "pytest", "-m", "multirank"]
