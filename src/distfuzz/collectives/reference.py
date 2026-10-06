@@ -57,6 +57,11 @@ class Val:
         return math.prod(self.shape)
 
 
+def snapshot(v):
+    """List entry for `v`: its tensor if the value is known, else a value-less Val that keeps dtype and shape."""
+    return v.v.clone() if v.v is not None else Val(None, v.layout, (v.dtype, v.shape))
+
+
 class Reference:
     def __init__(self, prog):
         self.p = prog
@@ -332,7 +337,7 @@ class Reference:
                     raise Stop("uncertain", "all_gather output spec differs from input")
             for x in m:
                 self.touch(x, {A[x]["t"]}, set(), asy[x], wv)
-                self.lists[x][rets["outs"]] = [None if v.v is None else v.v.clone() for v in vals]
+                self.lists[x][rets["outs"]] = [snapshot(v) for v in vals]
         elif op == "all_gather_into_tensor":
             vals = [self.get(x, A[x]["t"]) for x in m]
             self.same_meta(vals, op)
@@ -482,7 +487,7 @@ class Reference:
             for x in m:
                 self.touch(x, {A[x]["t"]}, set(), asy[x], wv)
             if "outs" in rets:
-                self.lists[root][rets["outs"]] = [None if v.v is None else v.v.clone() for v in vals]
+                self.lists[root][rets["outs"]] = [snapshot(v) for v in vals]
         elif op in ("barrier", "monitored_barrier"):
             for x in m:
                 self.touch(x, set(), set(), asy[x], wv)

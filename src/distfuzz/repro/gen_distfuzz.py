@@ -220,7 +220,7 @@ class Gen:
         exp_l = {}
         for r in range(self.W):
             for var, lst in ref.lists[r].items():
-                if all(hasattr(x, "shape") for x in lst):
+                if all(hasattr(x, "shape") and not isinstance(x, self.REF.Val) for x in lst):
                     exp_l.setdefault(var, {})[r] = lst
         return (exp_t, exp_l), "reference status=valid"
 

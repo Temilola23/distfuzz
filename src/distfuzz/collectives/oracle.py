@@ -4,7 +4,7 @@ import re
 
 import torch
 
-from .reference import run_reference
+from .reference import Val, run_reference
 
 TOL = {
     torch.float16: (1e-2, 1e-2),
@@ -47,11 +47,17 @@ def compare(ref, rs, skip):
             if got is None or var in skip:
                 continue
             n += 1
-            if len(got) != len(lst) or any(
-                not (close(g, e) if isinstance(e, torch.Tensor) else g == e) for g, e in zip(got, lst)
-            ):
+            if len(got) != len(lst) or not all(entry_ok(g, e) for g, e in zip(got, lst)):
                 bad.append((r, var))
     return bad, n
+
+
+def entry_ok(got, exp):
+    if isinstance(exp, Val):  # value unspecified (e.g. a non-root reduce buffer), dtype and shape are not
+        return got.dtype == exp.dtype and tuple(got.shape) == exp.shape
+    if isinstance(exp, torch.Tensor):
+        return close(got, exp)
+    return got == exp
 
 
 def close(a, b):
