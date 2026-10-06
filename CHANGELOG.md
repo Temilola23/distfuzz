@@ -4,6 +4,9 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Fixed
+- Collectives oracle: gathered list entries whose value the reference cannot know (for example a non-root `reduce` buffer) were compared against `None` and always reported `WRONG_RESULT`. Their dtype and shape are still checked.
+
 ### Changed
 - License: MIT replaced with all rights reserved.
 - README: key terms, diagrams for the three fuzzers and the finding-to-report pipeline, a guide to reading fuzzer output, and an annotated repository layout.

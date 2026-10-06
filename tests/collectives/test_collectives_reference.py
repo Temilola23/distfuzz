@@ -7,7 +7,7 @@ import torch
 
 from distfuzz.collectives import oracle
 from distfuzz.collectives import prog as P
-from distfuzz.collectives.reference import op_ok, reduce_vals, run_reference
+from distfuzz.collectives.reference import Val, op_ok, reduce_vals, run_reference
 
 
 def T(dtype="float32", shape=(2,), layout="contig", seed=1, kind="int"):
@@ -320,6 +320,69 @@ def test_O4_wrong_result_attribution_names_the_collective():
     rs = [{"outputs": {"t1": torch.zeros(3)}, "lists": {}, "exc": None, "wait_exc": []} for _ in range(4)]
     f = oracle.classify(p, {"kind": "ok", "results": rs}, ref=ref)[0]
     assert f and f[0]["sig"].startswith("WRONG_RESULT|scatter"), f
+
+
+def _reduce_then_all_gather(shape):
+    return {
+        "world": 4,
+        "calls": [
+            call("tensor", {"spec": T(shape=shape)}, {"out": "t1"}),
+            call(
+                "reduce",
+                {"group": "world", "t": "t1", "root": 2, "root_mode": "global", "op": "SUM", "async_op": False},
+            ),
+            call(
+                "all_gather",
+                {"group": "world", "out": T(shape=shape, seed=7), "n_delta": 0, "t": "t1", "async_op": False},
+                {"outs": "l3"},
+            ),
+        ],
+    }
+
+
+def _gathered(ref, root_entry, other=lambda e: torch.full_like(e, 99)):
+    """What each rank would observe: the root's entry as given, every other entry overwritten by `other`."""
+    expected_root = ref.t[2]["t1"].v
+    out = [root_entry if k == 2 else other(expected_root) for k in range(4)]
+    return [{"outputs": {}, "lists": {"l3": [e.clone() for e in out]}, "exc": None, "wait_exc": []} for _ in range(4)]
+
+
+@pytest.mark.parametrize("shape", [(3,), (0, 3, 1)])
+def test_O5_unknown_list_entries_are_not_compared(shape):
+    """Regression for O5, which was: compare() checked list entries with `g == e` when the reference had no
+    value (e is None), so every list built from a non-root `reduce` buffer was a WRONG_RESULT. Gloo really
+    does leave partial sums there (see test_TP_reduce_nonroot_buffer_is_unspecified in the end-to-end tests)."""
+    p = _reduce_then_all_gather(shape)
+    ref = run_reference(p)
+    assert ref.status == "valid"
+    entries = ref.lists[0]["l3"]
+    assert [isinstance(e, Val) for e in entries] == [True, True, False, True]
+    assert all(e.v is None and e.shape == tuple(shape) for k, e in enumerate(entries) if k != 2)
+    findings, info = oracle.classify(p, {"kind": "ok", "results": _gathered(ref, ref.t[2]["t1"].v)}, ref=ref)
+    assert findings == [] and info["checked"]
+
+
+def test_O5_known_list_entry_is_still_compared():
+    """The root's entry is fully determined; a wrong value there must still be reported."""
+    p = _reduce_then_all_gather((3,))
+    ref = run_reference(p)
+    wrong = ref.t[2]["t1"].v + 1
+    findings, _ = oracle.classify(p, {"kind": "ok", "results": _gathered(ref, wrong)}, ref=ref)
+    assert [f["kind"] for f in findings] == ["WRONG_RESULT"]
+    assert "(0, 'l3')" in findings[0]["detail"]
+
+
+@pytest.mark.parametrize(
+    "other",
+    [lambda e: torch.zeros(e.numel() + 1, dtype=e.dtype), lambda e: e.to(torch.float64)],
+    ids=["shape", "dtype"],
+)
+def test_O5_unknown_list_entry_still_checks_shape_and_dtype(other):
+    """An unspecified value still has a specified shape and dtype: all_gather cannot change either."""
+    p = _reduce_then_all_gather((3,))
+    ref = run_reference(p)
+    findings, _ = oracle.classify(p, {"kind": "ok", "results": _gathered(ref, ref.t[2]["t1"].v, other)}, ref=ref)
+    assert [f["kind"] for f in findings] == ["WRONG_RESULT"]
 
 
 def test_S1_stats_count_value_checked_programs():

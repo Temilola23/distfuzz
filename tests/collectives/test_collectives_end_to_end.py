@@ -1,7 +1,10 @@
 import pytest
+import torch
 
 from distfuzz.collectives.executor import run_once
 from distfuzz.collectives.oracle import classify
+from distfuzz.collectives.semantics import salt
+from distfuzz.collectives.tensors import expected_initial
 
 pytestmark = pytest.mark.multirank
 
@@ -137,6 +140,41 @@ def test_FP_reduce_after_reduce_is_reference_bug():
         classify(p, res)
     except AttributeError as e:
         pytest.fail(f"reference crashed: {e}")
+
+
+REDUCE_TO_2 = C(
+    "reduce", {"t": "t1", "root": 2, "root_mode": "global", "op": "SUM", "group": "world", "async_op": False}
+)
+
+
+def test_TP_reduce_nonroot_buffer_is_unspecified():
+    """Ground truth for O5: Gloo leaves partial sums in non-root buffers, so the reference cannot predict them."""
+    spec = T("float32", (6,))
+    p = {"world": 4, "calls": [C("tensor", {"spec": spec}, {"out": "t1"}), REDUCE_TO_2]}
+    res = run_once(p, world=4, timeout=3.0)
+    assert res["kind"] == "ok", res
+    changed = [
+        r
+        for r in (0, 1, 3)
+        if not torch.equal(res["results"][r]["outputs"]["t1"], expected_initial(spec, r, salt(0, "out")))
+    ]
+    assert changed, "Gloo left every non-root buffer untouched; treating it as unspecified would be too lenient"
+
+
+@pytest.mark.parametrize("shape", [(6,), (0, 3, 1)])
+def test_FP_all_gather_of_nonroot_reduce_buffer(shape):
+    """BUG O5: WRONG_RESULT|all_gather|list for every all_gather of a buffer a previous reduce left unspecified."""
+    calls = [
+        C("tensor", {"spec": T("float32", shape)}, {"out": "t1"}),
+        REDUCE_TO_2,
+        C(
+            "all_gather",
+            {"group": "world", "out": T("float32", shape, seed=7), "n_delta": 0, "t": "t1", "async_op": False},
+            {"outs": "l3"},
+        ),
+    ]
+    res, fs, info = run(calls)
+    assert fs == [] and info["checked"], (fs, info)
 
 
 def test_FP_same_membership_distinct_groups():
