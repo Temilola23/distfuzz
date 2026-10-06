@@ -71,6 +71,8 @@ class Reference:
         self.groups = [{} for _ in range(self.W)]
         self.works = [{} for _ in range(self.W)]
         self.inflight = [[] for _ in range(self.W)]
+        self.writer = [{} for _ in range(self.W)]  # var -> index of the last collective that wrote it
+        self.cur = None
         self.racy = False
         self.status, self.at, self.why = "valid", None, ""
 
@@ -90,6 +92,9 @@ class Reference:
         return self.groups[r][g]
 
     def touch(self, r, reads, writes, asy, wvar=None):
+        if self.p["calls"][self.cur]["op"] != "local":  # local ops are plain torch, not under test
+            for w in writes:
+                self.writer[r][w] = self.cur
         for er, ew in self.inflight[r]:
             if (writes & (er | ew)) or (reads & ew):
                 self.racy = True
@@ -105,12 +110,28 @@ class Reference:
 
     def run(self):
         for i, c in enumerate(self.p["calls"]):
+            self.cur = i
             try:
                 self.step(i, c)
             except Stop as s:
                 self.status, self.at, self.why = s.status, i, s.why
                 break
         return self
+
+    def origin(self, r, var):
+        """Index of the call to blame for a wrong value of `var` on rank `r`: the last collective that wrote it,
+        else the last other call that mentions it (a read-only input that was clobbered), else its creator."""
+        if var in self.writer[r]:
+            return self.writer[r][var]
+        creator = reader = None
+        for i, c in enumerate(self.p["calls"]):
+            names = set(c.get("rets", {}).values())
+            for src in [c["args"], *c.get("div", {}).values()]:
+                names |= {v for v in src.values() if isinstance(v, str)}
+            if var in names:
+                creator = i if creator is None else creator
+                reader = i if c["op"] not in ("tensor", "local") else reader
+        return reader if reader is not None else creator or 0
 
     def participants(self, i, c):
         eff = [effective_args(c, r) for r in range(self.W)]

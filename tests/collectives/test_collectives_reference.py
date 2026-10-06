@@ -292,9 +292,8 @@ def test_O3_crash_signature_depends_on_logdir():
     assert "logdir" in inspect.getsource(M.minimize) and "logdir=None" not in M.REPRO
 
 
-@pytest.mark.xfail(strict=True, reason="attribution picks the trailing `local`, not the scatter into a strided tensor")
 def test_O4_wrong_result_attribution_names_the_collective():
-    """Minor: attribution is 'last call whose rets or arg t mention var', so a trailing
+    """Regression for O4, which was: attribution is 'last call whose rets or arg t mention var', so a trailing
     `local` masks the collective that produced the wrong value."""
     p = {
         "world": 4,
@@ -383,6 +382,100 @@ def test_O5_unknown_list_entry_still_checks_shape_and_dtype(other):
     ref = run_reference(p)
     findings, _ = oracle.classify(p, {"kind": "ok", "results": _gathered(ref, ref.t[2]["t1"].v, other)}, ref=ref)
     assert [f["kind"] for f in findings] == ["WRONG_RESULT"]
+
+
+def _results(ref, t1=None, l3=None):
+    """Rank outputs equal to the reference, except t1 / l3 entries replaced by the given callables."""
+    rs = []
+    for r in range(4):
+        outs = {"t1": ref.t[r]["t1"].v.clone()}
+        lst = [e.clone() for e in ref.lists[r].get("l3", [])]
+        if t1:
+            outs["t1"] = t1(outs["t1"])
+        if l3:
+            lst = [l3(e) for e in lst]
+        rs.append({"outputs": outs, "lists": {"l3": lst} if lst else {}, "exc": None, "wait_exc": []})
+    return rs
+
+
+def _all_reduce_then_all_gather():
+    return {
+        "world": 4,
+        "calls": [
+            call("tensor", {"spec": T(shape=(3,))}, {"out": "t1"}),
+            call("all_reduce", {"group": "world", "t": "t1", "op": "SUM", "async_op": False}),
+            call(
+                "all_gather",
+                {"group": "world", "out": T(shape=(3,), seed=7), "n_delta": 0, "t": "t1", "async_op": False},
+                {"outs": "l3"},
+            ),
+        ],
+    }
+
+
+def _sig(p, rs):
+    findings, _ = oracle.classify(p, {"kind": "ok", "results": rs})
+    assert [f["kind"] for f in findings] == ["WRONG_RESULT"], findings
+    return findings[0]["sig"]
+
+
+def test_O6_read_only_use_is_not_blamed():
+    """Regression for O6, which was: a later call that only reads t1 (all_gather's input) took the blame for
+    the value an earlier collective wrote. The minimized strided 'all_gather'/'gather' findings were reduces."""
+    p = _all_reduce_then_all_gather()
+    ref = run_reference(p)
+    assert _sig(p, _results(ref, t1=lambda v: v + 1, l3=lambda e: e + 1)).startswith("WRONG_RESULT|all_reduce|")
+
+
+def test_O6_wrong_output_of_later_call_is_blamed_on_it():
+    """Control: inputs correct, only the gathered list wrong -> the gather is at fault, not the all_reduce."""
+    p = _all_reduce_then_all_gather()
+    ref = run_reference(p)
+    assert _sig(p, _results(ref, l3=lambda e: e + 1)) == "WRONG_RESULT|all_gather|list"
+
+
+def test_O6_earliest_wrong_output_wins():
+    """A wrong reduce result on the root, then gathered: both are wrong, the reduce came first."""
+    p = {
+        "world": 4,
+        "calls": [
+            call("tensor", {"spec": T("int64", (3,))}, {"out": "t1"}),
+            call(
+                "reduce",
+                {"group": "world", "t": "t1", "root": 1, "root_mode": "global", "op": "SUM", "async_op": False},
+            ),
+            call(
+                "gather",
+                {
+                    "group": "world",
+                    "t": "t1",
+                    "out": T("int64", (3,), seed=5),
+                    "n_delta": 0,
+                    "root": 0,
+                    "root_mode": "global",
+                    "list_everywhere": False,
+                    "async_op": False,
+                },
+                {"outs": "l3"},
+            ),
+        ],
+    }
+    ref = run_reference(p)
+    rs = [{"outputs": {}, "lists": {}, "exc": None, "wait_exc": []} for _ in range(4)]
+    root_val = ref.t[1]["t1"].v + 1
+    rs[1]["outputs"]["t1"] = root_val
+    rs[0]["lists"]["l3"] = [
+        e if isinstance(e, torch.Tensor) else torch.zeros(3, dtype=torch.int64) for e in ref.lists[0]["l3"]
+    ]
+    rs[0]["lists"]["l3"][1] = root_val
+    assert _sig(p, rs) == "WRONG_RESULT|reduce|torch.int64"
+
+
+def test_O6_local_rewrite_does_not_move_the_blame():
+    p = _all_reduce_then_all_gather()
+    p["calls"].insert(2, call("local", {"t": "t1", "fn": "mul2"}))
+    ref = run_reference(p)
+    assert ref.origin(0, "t1") == 1
 
 
 def test_S1_stats_count_value_checked_programs():
