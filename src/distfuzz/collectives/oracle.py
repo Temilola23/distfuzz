@@ -176,10 +176,9 @@ def classify(prog, res, ref=None):
         bad, n = compare(ref, rs, touched_from(prog, ref.at) if ref.at is not None else set())
         info["checked"] = n > 0
         if bad:
-            r, var = bad[0]
-            opname = [c["op"] for c in prog["calls"] if var in c.get("rets", {}).values() or var == c["args"].get("t")][
-                -1
-            ]
+            # errors propagate forward, so the earliest call that produced a wrong value is the likeliest cause
+            at, r, var = min((ref.origin(r, var), r, var) for r, var in bad)
+            opname = prog["calls"][at]["op"]
             exp = ref.t[r].get(var)
             dt = str(exp.v.dtype) if exp is not None and exp.v is not None else "list"
             findings.append(

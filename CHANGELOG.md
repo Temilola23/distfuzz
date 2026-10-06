@@ -6,6 +6,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Fixed
 - Collectives oracle: gathered list entries whose value the reference cannot know (for example a non-root `reduce` buffer) were compared against `None` and always reported `WRONG_RESULT`. Their dtype and shape are still checked.
+- Collectives oracle: `WRONG_RESULT` findings were named after the last call that mentioned the tensor, even one that only read it. They now name the earliest call whose output is wrong, from the reference model's record of which collective last wrote each value.
 
 ### Changed
 - License: MIT replaced with all rights reserved.

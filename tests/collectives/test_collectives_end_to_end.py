@@ -202,6 +202,37 @@ def test_TP_strided_all_reduce_is_reported():
     assert "WRONG_RESULT" in kinds(fs), (fs, info)
 
 
+def test_TP_strided_all_reduce_then_read_is_blamed_on_all_reduce():
+    """BUG O6: the strided all_reduce bug was reported as WRONG_RESULT|all_gather because a later call read t1."""
+    calls = [
+        C("tensor", {"spec": T("int64", (4,), layout="noncontig")}, {"out": "t1"}),
+        C("all_reduce", {"t": "t1", "op": "SUM", "group": "world", "async_op": False}),
+        C(
+            "all_gather",
+            {"group": "world", "out": T("int64", (4,), seed=7), "n_delta": 0, "t": "t1", "async_op": False},
+            {"outs": "l3"},
+        ),
+    ]
+    res, fs, info = run(calls)
+    assert [f["sig"] for f in fs if f["kind"] == "WRONG_RESULT"] == ["WRONG_RESULT|all_reduce|torch.int64"], fs
+
+
+def test_TP_strided_subgroup_reduce_is_blamed_on_reduce():
+    """A program from the strategy experiment, reported as WRONG_RESULT|all_gather|list before O5 and O6."""
+    calls = [
+        C("new_group", {"ranks": [0, 2], "local_sync": False}, {"g": "g1"}),
+        C("tensor", {"spec": T("int64", (3,), layout="noncontig", seed=418)}, {"out": "t2"}),
+        C("reduce", {"group": "g1", "t": "t2", "root": 1, "root_mode": "group", "op": "SUM", "async_op": False}),
+        C(
+            "all_gather",
+            {"group": "world", "out": T("int64", (3,), seed=677), "n_delta": 0, "t": "t2", "async_op": False},
+            {"outs": "l3"},
+        ),
+    ]
+    res, fs, info = run(calls)
+    assert [f["sig"] for f in fs if f["kind"] == "WRONG_RESULT"] == ["WRONG_RESULT|reduce|torch.int64"], fs
+
+
 def test_TP_agit_stack_form_rejected_by_gloo_contradicts_docs():
     """Reproducible on 2.11 and 2.14: docs promise the stacked output form, Gloo raises -> VALID_ERROR is a
     true positive with respect to the documented contract."""
