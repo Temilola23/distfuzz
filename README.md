@@ -48,7 +48,7 @@ Each fuzzer is differential. It runs the same program twice, once through the di
 | syzlang descriptions, typed resources | `collectives/desc.py` (resources `tensor`, `group`, `work`, `list`); `dtensor/gen.py` op templates | A Python table, not a language; no extraction from docs or OpInfo |
 | `prog/` generation and mutation | `prog.py`, `gen.py`: insert, remove, mutate argument, splice, plus `diverge` (one rank skips or changes a call) | No learned choice table (`prog/prio.go`) |
 | executor with fork server | Persistent rank processes, fresh process group per program, restart on hang or crash; about 17x faster than a fresh world per program | One session at a time |
-| kcov coverage | `sys.monitoring` line coverage of `torch/distributed` | Python only; the C++ in Gloo and `ProcessGroupGloo.cpp`, where the bugs are, is invisible |
+| kcov coverage | `sys.monitoring` line coverage of `torch/distributed`; with `--signal cxx`, SanitizerCoverage edge counters in Gloo and c10d from an instrumented build (`docker/Dockerfile.cov`) | C++ coverage needs the 1-2 hour source build; background threads produce about 2,400 noise features, calibrated away at start |
 | KASAN | GUARD sentinel oracle; differential reference models | No sanitizer build of Gloo or c10d yet |
 | `pkg/repro`, `pkg/bisect`, syzbot dashboard | ddmin minimizers, `distfuzz.repro` (reliability, release bisection, static dashboard) | Release-level bisection only, no commit bisection |
 
@@ -131,7 +131,7 @@ The final JSON line adds `valid` / `invalid` / `uncertain` (the reference model'
 |---|---|
 | `findings/<id>.json` | one file per signature: kind, signature, the program, per-rank evidence |
 | `findings/<id>_repro.py` | written by `minimize`: the standalone repro |
-| `corpus/` | programs kept in guided mode |
+| `corpus/` | programs that raised coverage (every mode); guided mode mutates them |
 | `stats.jsonl` | one progress snapshot per line, for plotting |
 | `summary.json` | final stats and the list of findings |
 | `logs/` | per-rank logs from crashes and hangs |
@@ -164,6 +164,14 @@ torchrun --nproc-per-node 4 examples/repros/collectives/gloo_strided_sweep.py
 python -m distfuzz.repro images --only 2.14.0
 python -m distfuzz.repro bundle examples/repros/dtensor/cases.py::setitem_shard --name setitem --n 5 --no-bisect
 python -m distfuzz.repro specs examples/repro_specs.json --jobs 2   # rebuild every bundle: 20-run reliability, release bisection
+```
+
+**C++ coverage.** `docker/Dockerfile.cov` builds PyTorch v2.14.0 from source with clang and SanitizerCoverage in Gloo and c10d only (128,324 edges; about 20 GB of memory and 1-2 hours to build). `--signal cxx` reads the counters in every rank. In guided mode a program with new C++ features is re-run twice; features a re-run does not reproduce are dropped and ignored from then on, and the program is shrunk to the calls the new features need before it enters the corpus.
+
+```bash
+docker build -f docker/Dockerfile.cov -t distfuzz:cov .
+docker run --rm --memory 3g --cpus 4 --shm-size 1g -v "$PWD/runs:/src/runs" distfuzz:cov \
+  python -m distfuzz.collectives fuzz --mode guided --signal cxx --minutes 10 --out runs/cxx
 ```
 
 Another torch build for the fuzzers: `docker build --build-arg TORCH_SPEC=torch --build-arg TORCH_INDEX=https://download.pytorch.org/whl/nightly/cpu -t distfuzz:nightly .`
@@ -206,7 +214,7 @@ What holds up:
 - Findings minimize to 1 to 4 calls and reproduce deterministically.
 
 What does not, yet:
-- Coverage guidance is not earning its keep. Python line coverage saturates within minutes and cannot see the C++ where every confirmed bug lives. In a 30-minute comparison, guided collectives fuzzing found fewer distinct signatures than random mode; for DTensor, guidance added about 1% coverage.
+- Coverage guidance is not earning its keep yet. Python line coverage saturates within minutes and cannot see the C++ where the confirmed collectives bugs live. With C++ coverage (`--signal cxx`), a 5-seed, 10-minute comparison still put random ahead on stable C++ edges reached (median 6,454 vs 5,375, every seed). Random runs end within 40 edges of each other, so the limit is what the descriptions can express rather than the search. For DTensor, Python guidance added about 1% coverage.
 - A single-op property test of about 250 lines rediscovers most of the headline bugs within minutes. So far the multi-call program machinery is not what finds bugs; baselines at equal budget are the next thing to run.
 - The fuzz loop does not deflake findings or reload its corpus between runs. `distfuzz.repro` measures reliability after the fact.
 - API breadth: 20 of 26 c10d collective and p2p calls, 86 of 364 DTensor sharding-strategy ops. Gloo on CPU only; NCCL is untested.
@@ -225,11 +233,12 @@ distfuzz/
 │   │   ├── tensors.py          builds each rank's input tensors, including strided views with sentinel cells
 │   │   ├── semantics.py        shared rules for roots, group membership and shapes
 │   │   ├── interp.py           runs one program on one rank; Python line coverage via sys.monitoring
+│   │   ├── cxxcov.py           reads the C++ edge counters of an instrumented build (--signal cxx)
 │   │   ├── executor.py         keeps N rank processes alive; runs programs, restarts on hang or crash
 │   │   ├── reference.py        single-process reference model: expected value of every tensor on every rank
 │   │   ├── oracle.py           compares ranks with the reference and turns differences into findings
 │   │   ├── faults.py           fault and lifecycle ops for --fault mode (drop a Work, resize in flight, abort)
-│   │   ├── fuzzer.py           the main loop: pick or mutate a program, run, check, record, keep corpus
+│   │   ├── fuzzer.py           the main loop: pick or mutate a program, run, check, record, keep corpus; C++ triage
 │   │   ├── minimize.py         delta-debugging minimizer for findings
 │   │   ├── replay.py           replays a crash or hang with the programs that ran before it
 │   │   └── __main__.py         CLI: fuzz, bench, minimize, replay
@@ -271,6 +280,7 @@ distfuzz/
 ├── docs/PR_GUIDE.md            how to write and review a PR
 ├── .github/                    CI workflow, PR template, issue templates
 ├── Dockerfile, Makefile        the distfuzz:cpu image and common commands
+├── docker/                    Dockerfile.cov (PyTorch built with C++ coverage) and its counter runtime, cov/dfcov.c
 ├── BACKLOG.md                  roadmap and open questions
 └── CHANGELOG.md
 ```
