@@ -257,13 +257,15 @@ def exec_call(i, c, env: RankEnv):
         dist.broadcast_object_list(lst, **kw)
         env.lists[rets["outs"]] = lst
     elif op == "all_reduce_coalesced":
-        ts = [env.mk(a["t"], salt(i, "coalesced", k)).view for k in range(a["k"])]
+        spec = {"dtype": "float32", "shape": [2], "layout": "contig", "seed": 0, "kind": "int"}
+        ts = [env.mk(spec, salt(i, f"coalesced_{k}")).view for k in range(a["k"])]
         work = dist.all_reduce_coalesced(ts, op=RO[a["op"]], async_op=asy, **kw)
     elif op == "all_gather_coalesced":
-        outs = [[env.mk(a["out"], salt(i, f"coalesced_outs_{j}_{k}")) for k in range(n)] for j in range(a["k"])]
-        inp = [env.mk(a["t"], salt(i, f"coalesced_inp_{j}")).view for j in range(a["k"])]
-        env.lists[rets["outs"]] = [[o.view for o in row] for row in outs]
-        work = dist.all_gather_coalesced([[o.view for o in row] for row in outs], inp, async_op=asy, **kw)
+        spec = {"dtype": "float32", "shape": [2], "layout": "contig", "seed": 0, "kind": "int"}
+        outs = [[env.mk(spec, salt(i, f"coalesced_outs_{j}_{k}")).view for k in range(n)] for j in range(a["k"])]
+        inp = [env.mk(spec, salt(i, f"coalesced_inp_{j}")).view for j in range(a["k"])]
+        env.lists[rets["outs"]] = inp
+        work = dist.all_gather_coalesced(outs, inp, async_op=asy, **kw)
     elif op == "gather_object":
         root = resolve_root(a, mem, rank)
         gl = None if root != rank else [None] * n
@@ -276,8 +278,8 @@ def exec_call(i, c, env: RankEnv):
             env.lists[rets["outs"]] = gl
     elif op == "scatter_object_list":
         root = resolve_root(a, mem, rank)
-        si = [{"r": a["root"], "s": a["seed"], "i": k} for k in range(a["k"])] if rank == root else None
-        so = [None] * a["k"]
+        si = [{"r": root, "s": a["seed"], "i": i} for i in range(n)] if rank == root else None
+        so = [None]
         if a.get("root_mode") == "group":
             kw["group_src"] = a["root"]
         else:

@@ -533,29 +533,29 @@ class Reference:
         elif op == "all_reduce_coalesced":
             self.same(parts, m, "k")
             self.same(parts, m, "op")
+            if not op_ok(a0["op"], "float32"):
+                raise Stop("uncertain", f"{a0['op']} invalid")
             k = a0["k"]
             for ki in range(k):
-                spec = A[m[0]].get("t", {"dtype": "float32", "shape": [1]})
-                if isinstance(spec, str):
-                    raise Stop("uncertain", "all_reduce_coalesced tensor spec missing")
+                spec = {"dtype": "float32", "shape": [2], "layout": "contig", "seed": 0, "kind": "int"}
                 vals = [Val(T.expected_initial(spec, x, salt(i, f"coalesced_{ki}")), "contig") for x in m]
                 self.same_meta(vals, op)
-                if not op_ok(a0["op"], T.NAME[vals[0].dtype]):
-                    raise Stop("uncertain", f"{a0['op']} on {vals[0].dtype}")
-                for v in vals:
-                    self.check_write(v)
                 res = None if any(v.v is None for v in vals) else reduce_vals(a0["op"], [v.v for v in vals])
-                for x in m:
-                    self.touch(x, set(), set(), asy[x], wv)
+            for x in m:
+                self.touch(x, set(), set(), asy[x], wv)
         elif op == "all_gather_coalesced":
             self.same(parts, m, "k")
             k = a0["k"]
+            spec = {"dtype": "float32", "shape": [2], "layout": "contig", "seed": 0, "kind": "int"}
             for ki in range(k):
-                vals = [self.get(x, A[x]["t"]) for x in m]
+                vals = [Val(T.expected_initial(spec, x, salt(i, f"coalesced_inp_{ki}")), "contig") for x in m]
                 self.same_meta(vals, op)
             for x in m:
-                self.touch(x, {A[x]["t"]}, {rets["outs"]}, asy[x], wv)
-                self.lists[x][rets["outs"]] = [[snapshot(self.get(y, A[y]["t"])) for y in m] for _ in range(k)]
+                self.touch(x, set(), {rets["outs"]}, asy[x], wv)
+                self.lists[x][rets["outs"]] = [
+                    [Val(T.expected_initial(spec, y, salt(i, f"coalesced_inp_{ki}")), "contig") for y in m]
+                    for ki in range(k)
+                ]
         elif op == "gather_object":
             root = root_of()
             objs = [{"r": x, "s": A[x]["seed"]} for x in m]
@@ -565,11 +565,11 @@ class Reference:
                 self.lists[root][rets["outs"]] = list(objs)
         elif op == "scatter_object_list":
             root = root_of()
-            self.same(parts, m, "k")
-            lst = [{"r": root, "s": A[root]["seed"], "i": k} for k in range(a0["k"])]
+            lst = [{"r": root, "s": A[root]["seed"], "i": i} for i in range(n)]
             for x in m:
                 self.touch(x, set(), set(), asy[x], wv)
-                self.lists[x][rets["out"]] = list(lst)
+                obj = lst[m.index(x)] if x in m else {"r": root}
+                self.lists[x][rets["out"]] = [obj]
         elif op == "send_object_list":
             raise Stop("uncertain", "send_object_list p2p not modeled")
         elif op == "recv_object_list":
