@@ -97,7 +97,8 @@ def exec_call(i, c, env: RankEnv):
         return
     op, rets, rank = c["op"], c.get("rets", {}), env.rank
     to = timedelta(seconds=env.timeout)
-    work = None
+    # the coalesced calls return work.get_future() when async; only wait() is used on either
+    work: dist.Work | torch.Future | None = None
     if op == "tensor":
         env.t[rets["out"]] = env.mk(a["spec"], salt(i, "out"))
         return
@@ -267,7 +268,7 @@ def exec_call(i, c, env: RankEnv):
         work = dist.all_gather_coalesced(outs, ins, async_op=asy, **kw)
     elif op == "gather_object":
         root = resolve_root(a, mem, rank)
-        gl = None if root != rank else [None] * n
+        gl: list[object] | None = None if root != rank else [None] * n
         if a.get("root_mode") == "group":
             kw["group_dst"] = a["root"]
         else:
