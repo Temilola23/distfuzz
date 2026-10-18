@@ -546,6 +546,7 @@ def test_new_group_out_of_range_ranks_is_uncertain_not_valid():
 
 # New coalesced and object collectives
 
+
 def test_all_reduce_coalesced_valid_program():
     p = {
         "world": 4,
@@ -629,6 +630,7 @@ def test_send_recv_object_list_valid_program():
 
 
 # Rank-divergent and uneven shapes
+
 
 def test_divergent_tensor_shapes_same_numel_is_uncertain():
     """Rank-divergent tensors with same number of elements but different shapes."""
