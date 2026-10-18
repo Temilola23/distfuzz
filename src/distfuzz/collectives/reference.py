@@ -362,6 +362,14 @@ class Reference:
         elif op == "all_gather_into_tensor":
             vals = [self.get(x, A[x]["t"]) for x in m]
             self.same_meta(vals, op)
+            outs = {x: A[x]["out"] for x in m}
+            if len({(o["dtype"], tuple(o["shape"])) for o in outs.values()}) > 1:
+                if len({o["dtype"] for o in outs.values()}) > 1:
+                    raise Stop("invalid", "all_gather_into_tensor dtype differs")
+                out_numels = {math.prod(o["shape"]) for o in outs.values()}
+                if len(out_numels) > 1:
+                    raise Stop("invalid", "all_gather_into_tensor shapes differ (different numel)")
+                raise Stop("uncertain", "all_gather_into_tensor shapes differ (same numel)")
             for x in m:
                 o = A[x]["out"]
                 if o["dtype"] != T.NAME[vals[0].dtype] or math.prod(o["shape"]) != n * vals[0].numel():
@@ -522,6 +530,42 @@ class Reference:
             lst = [{"r": root, "s": A[root]["seed"], "i": k} for k in range(a0["k"])]
             for x in m:
                 self.lists[x][rets["outs"]] = list(lst)
+        elif op in ("all_reduce_coalesced", "all_gather_coalesced"):
+            self.same(parts, m, "k")
+            self.same(parts, m, "spec")
+            spec = a0["spec"]
+            if spec["layout"] == "expanded":
+                raise Stop("uncertain", "write into stride-0 expanded tensor")
+            ins = {x: [T.expected_initial(spec, x, salt(i, "in", k)) for k in range(a0["k"])] for x in m}
+            if op == "all_reduce_coalesced":
+                self.same(parts, m, "op")
+                if not op_ok(a0["op"], spec["dtype"]):
+                    raise Stop("uncertain", f"{a0['op']} on {spec['dtype']}")
+                res = [reduce_vals(a0["op"], [ins[x][k] for x in m]) for k in range(a0["k"])]
+            for x in m:
+                self.touch(x, set(), {rets["outs"]}, asy[x], wv)
+                if op == "all_reduce_coalesced":
+                    self.lists[x][rets["outs"]] = [t.clone() for t in res]
+                else:
+                    self.lists[x][rets["outs"]] = [ins[y][k].clone() for y in m for k in range(a0["k"])]
+        elif op == "gather_object":
+            root = root_of()
+            objs = [{"r": x, "s": A[x]["seed"]} for x in m]
+            for x in m:
+                self.touch(x, set(), set(), asy[x], wv)
+            if "outs" in rets:
+                self.lists[root][rets["outs"]] = list(objs)
+        elif op == "scatter_object_list":
+            root = root_of()
+            lst = [{"r": root, "s": A[root]["seed"], "i": i} for i in range(n)]
+            for x in m:
+                self.touch(x, set(), set(), asy[x], wv)
+                obj = lst[m.index(x)] if x in m else {"r": root}
+                self.lists[x][rets["out"]] = [obj]
+        elif op == "send_object_list":
+            raise Stop("uncertain", "send_object_list p2p not modeled")
+        elif op == "recv_object_list":
+            raise Stop("uncertain", "recv_object_list p2p not modeled")
         else:
             raise Stop("uncertain", f"no reference for {op}")
 

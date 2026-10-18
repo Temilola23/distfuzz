@@ -256,6 +256,42 @@ def exec_call(i, c, env: RankEnv):
             kw["src"] = a["root"]
         dist.broadcast_object_list(lst, **kw)
         env.lists[rets["outs"]] = lst
+    elif op == "all_reduce_coalesced":
+        ts = [env.mk(a["spec"], salt(i, "in", k)).view for k in range(a["k"])]
+        env.lists[rets["outs"]] = ts
+        work = dist.all_reduce_coalesced(ts, op=RO[a["op"]], async_op=asy, **kw)
+    elif op == "all_gather_coalesced":
+        ins = [env.mk(a["spec"], salt(i, "in", k)).view for k in range(a["k"])]
+        outs = [[torch.empty_like(t, memory_format=torch.contiguous_format) for t in ins] for _ in range(n)]
+        env.lists[rets["outs"]] = [t for per_rank in outs for t in per_rank]  # rank-major
+        work = dist.all_gather_coalesced(outs, ins, async_op=asy, **kw)
+    elif op == "gather_object":
+        root = resolve_root(a, mem, rank)
+        gl = None if root != rank else [None] * n
+        if a.get("root_mode") == "group":
+            kw["group_dst"] = a["root"]
+        else:
+            kw["dst"] = a["root"]
+        dist.gather_object({"r": rank, "s": a["seed"]}, gl, **kw)
+        if gl is not None:
+            env.lists[rets["outs"]] = gl
+    elif op == "scatter_object_list":
+        root = resolve_root(a, mem, rank)
+        si = [{"r": root, "s": a["seed"], "i": i} for i in range(n)] if rank == root else None
+        so = [None]
+        if a.get("root_mode") == "group":
+            kw["group_src"] = a["root"]
+        else:
+            kw["src"] = a["root"]
+        dist.scatter_object_list(so, si, **kw)
+        env.lists[rets["out"]] = so
+    elif op == "send_object_list":
+        sl = [{"r": rank, "s": a["seed"], "i": k} for k in range(a["k"])]
+        dist.send_object_list(sl, a["dst"], group=env.pg)
+    elif op == "recv_object_list":
+        rl = [None] * a["k"]
+        dist.recv_object_list(rl, a["src"], group=env.pg)
+        env.lists[rets["outs"]] = rl
     else:
         raise ValueError(op)
     if "w" in rets:

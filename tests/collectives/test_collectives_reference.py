@@ -7,7 +7,9 @@ import torch
 
 from distfuzz.collectives import oracle
 from distfuzz.collectives import prog as P
+from distfuzz.collectives import tensors as T_
 from distfuzz.collectives.reference import Val, op_ok, reduce_vals, run_reference
+from distfuzz.collectives.semantics import salt
 
 
 def T(dtype="float32", shape=(2,), layout="contig", seed=1, kind="int"):
@@ -542,3 +544,151 @@ def test_P1_wait_on_undefined_work_is_not_checked_by_reference():
 def test_new_group_out_of_range_ranks_is_uncertain_not_valid():
     p = {"world": 4, "calls": [call("new_group", {"ranks": [0, 4], "local_sync": False}, {"g": "g1"})]}
     assert run_reference(p).status == "uncertain"
+
+
+# New coalesced and object collectives
+
+
+@pytest.mark.parametrize("op", ["all_reduce_coalesced", "all_gather_coalesced"])
+def test_coalesced_reference_values(op):
+    spec = T("int64", (2, 3), layout="noncontig")
+    args = {"k": 2, "spec": spec, "group": "world", "async_op": False}
+    if op == "all_reduce_coalesced":
+        args["op"] = "SUM"
+    p = {"world": 4, "calls": [call(op, args, {"outs": "l1"})]}
+    ref = run_reference(p)
+    assert ref.status == "valid"
+    ins = [[T_.expected_initial(spec, r, salt(0, "in", k)) for k in range(2)] for r in range(4)]
+    want = (
+        [ins[0][k] + ins[1][k] + ins[2][k] + ins[3][k] for k in range(2)]
+        if op == "all_reduce_coalesced"
+        else [ins[r][k] for r in range(4) for k in range(2)]
+    )
+    for r in range(4):
+        got = ref.lists[r]["l1"]
+        assert len(got) == len(want) and all(torch.equal(g, w) for g, w in zip(got, want))
+
+
+def test_coalesced_ranks_disagreeing_on_spec_is_invalid():
+    args = {"k": 1, "spec": T(), "op": "SUM", "group": "world", "async_op": False}
+    p = {"world": 4, "calls": [call("all_reduce_coalesced", args, {"outs": "l1"}, div={"2": {"spec": T(shape=(3,))}})]}
+    assert run_reference(p).status == "invalid"
+
+
+def test_gather_object_valid_program():
+    p = {
+        "world": 4,
+        "calls": [
+            call("gather_object", {"seed": 42, "root": 1, "root_mode": "global", "group": "world"}, {"outs": "l1"}),
+        ],
+    }
+    ref = run_reference(p)
+    assert ref.status == "valid"
+    assert ref.lists[1]["l1"] == [{"r": 0, "s": 42}, {"r": 1, "s": 42}, {"r": 2, "s": 42}, {"r": 3, "s": 42}]
+
+
+def test_gather_object_only_root_gets_list():
+    p = {
+        "world": 4,
+        "calls": [
+            call("gather_object", {"seed": 42, "root": 2, "root_mode": "global", "group": "world"}, {"outs": "l1"}),
+        ],
+    }
+    ref = run_reference(p)
+    assert ref.status == "valid"
+    assert "l1" in ref.lists[2]
+    assert "l1" not in ref.lists[0]
+
+
+def test_scatter_object_list_valid_program():
+    p = {
+        "world": 4,
+        "calls": [
+            call(
+                "scatter_object_list",
+                {"seed": 99, "k": 2, "root": 0, "root_mode": "global", "group": "world"},
+                {"out": "l1"},
+            ),
+        ],
+    }
+    ref = run_reference(p)
+    assert ref.status == "valid"
+    for r in range(4):
+        expected = [{"r": 0, "s": 99, "i": r}]
+        assert ref.lists[r]["l1"] == expected
+
+
+def test_send_recv_object_list_uncertain_p2p():
+    """send/recv_object_list are p2p and not fully modeled in reference."""
+    p = {
+        "world": 4,
+        "calls": [
+            call("send_object_list", {"k": 1, "dst": 2, "group": "world"}),
+        ],
+    }
+    ref = run_reference(p)
+    assert ref.status == "uncertain"
+
+
+# Rank-divergent and uneven shapes
+
+
+def test_divergent_tensor_shapes_same_numel_is_uncertain():
+    """Rank-divergent tensors with same number of elements but different shapes."""
+    p = {
+        "world": 4,
+        "calls": [
+            call("tensor", {"spec": T("float32", (4,))}, {"out": "t1"}),
+            call(
+                "all_gather_into_tensor",
+                {"out": T("float32", (16,)), "t": "t1", "group": "world", "async_op": False},
+                {"out": "t2"},
+                div={"1": {"out": T("float32", (4, 4))}},
+            ),
+        ],
+    }
+    ref = run_reference(p)
+    assert ref.status == "uncertain" and "shapes" in ref.why
+
+
+def test_divergent_tensor_shapes_different_numel_is_invalid():
+    """Rank-divergent tensors with different number of elements."""
+    p = {
+        "world": 4,
+        "calls": [
+            call("tensor", {"spec": T("float32", (2, 2))}, {"out": "t1"}),
+            call(
+                "all_gather_into_tensor",
+                {"out": T("float32", (4, 2)), "t": "t1", "group": "world", "async_op": False},
+                {"out": "t2"},
+                div={"1": {"out": T("float32", (3, 2))}},
+            ),
+        ],
+    }
+    ref = run_reference(p)
+    assert ref.status == "invalid" and "differ" in ref.why
+
+
+def test_divergent_reduce_scatter_output_mismatch():
+    """Rank-divergent output shapes that don't match input (should be uncertain)."""
+    p = {
+        "world": 4,
+        "calls": [
+            call(
+                "reduce_scatter",
+                {
+                    "out": T("float32", (2,)),
+                    "ins": T("float32", (8,)),
+                    "n_delta": 0,
+                    "op": "SUM",
+                    "group": "world",
+                    "async_op": False,
+                },
+                {"out": "t1"},
+                div={"1": {"out": T("float32", (1, 2))}},
+            ),
+        ],
+    }
+    ref = run_reference(p)
+    # Rank 1 has output shape (1, 2) but input (8) - they don't match
+    assert ref.status == "uncertain" and "reduce_scatter" in ref.why

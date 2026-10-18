@@ -14,7 +14,7 @@ Each fuzzer is differential. It runs the same program twice, once through the di
 
 | Package | Target | Oracle |
 |---|---|---|
-| `distfuzz.collectives` | c10d collectives and p2p on Gloo (22 calls described), with per-rank divergence | A single-process model of all ranks predicts every tensor on every rank. Sentinel cells around each buffer catch writes outside a view. Also: crash, hang, error on a valid program, silent acceptance of an invalid one. |
+| `distfuzz.collectives` | c10d collectives and p2p on Gloo (28 calls described), with per-rank divergence and uneven shapes | A single-process model of all ranks predicts every tensor on every rank. Sentinel cells around each buffer catch writes outside a view. Also: crash, hang, error on a valid program, silent acceptance of an invalid one. |
 | `distfuzz.collectives --fault` | Lifecycle and fault ops on top of the above: drop a `Work` before `wait()`, wait twice, destroy or abort a group, resize or free a tensor while an async collective uses it, SIGKILL a rank mid-collective | Crash and hang oracles only. A rank the program kills on purpose is expected to die; a surviving rank that dies with SIGSEGV or SIGABRT is a finding. Crash findings keep the programs that ran before them, and `replay` trims that history. |
 | `distfuzz.dtensor` | DTensor ops (about 150 templates, Shard/Replicate/Partial on 1-D and 2-D meshes, autograd, `torch.compile`) | `full_tensor()` must equal the same program on plain tensors; also shapes, local shard shapes, gradients, and whether all ranks raise the same error. |
 | `distfuzz.dcp` | `torch.distributed.checkpoint` save/load and `get_state_dict`/`set_state_dict` across FSDP2, TP, HSDP, DDP and 2-D meshes | Checkpoints are reloaded into a poisoned model under a different world size and parallelism; loaded state must match saved state bitwise, and training must match an unsharded reference. |
@@ -217,7 +217,7 @@ What does not, yet:
 - Coverage guidance is not earning its keep yet. Python line coverage saturates within minutes and cannot see the C++ where the confirmed collectives bugs live. With C++ coverage (`--signal cxx`), a 5-seed, 10-minute comparison still put random ahead on stable C++ edges reached (median 6,454 vs 5,375, every seed). Random runs end within 40 edges of each other, so the limit is what the descriptions can express rather than the search. For DTensor, Python guidance added about 1% coverage.
 - A single-op property test of about 250 lines rediscovers most of the headline bugs within minutes. So far the multi-call program machinery is not what finds bugs; baselines at equal budget are the next thing to run.
 - The fuzz loop does not deflake findings or reload its corpus between runs. `distfuzz.repro` measures reliability after the fact.
-- API breadth: 20 of 26 c10d collective and p2p calls, 86 of 364 DTensor sharding-strategy ops. Gloo on CPU only; NCCL is untested.
+- API breadth: 26 of 26 c10d collective and p2p calls (all_reduce, broadcast, reduce, all_gather, all_gather_into_tensor, reduce_scatter, reduce_scatter_tensor, all_to_all_single, scatter, gather, barrier, monitored_barrier, p2p, ring, all_gather_object, broadcast_object_list, all_reduce_coalesced, all_gather_coalesced, gather_object, scatter_object_list, send_object_list, recv_object_list; async via wait), 86 of 364 DTensor sharding-strategy ops. Gloo on CPU only; NCCL is untested.
 - Campaigns so far are 15 to 75 minutes on 4 CPUs.
 
 [BACKLOG.md](BACKLOG.md) has the roadmap in priority order.

@@ -287,3 +287,39 @@ def test_ISO_session_survives_timeout_desync():
             assert r["kind"] == "ok" and info["exc"] == 0 and fs == [], (info, fs)
     finally:
         s.stop(hard=True)
+
+
+# New collective operations
+
+
+@pytest.mark.parametrize("layout", ["contig", "offset", "noncontig"])
+@pytest.mark.parametrize("op", ["all_reduce_coalesced", "all_gather_coalesced"])
+def test_TP_coalesced_matches_reference(op, layout):
+    """Every gathered or reduced value is checked against the reference, including strided inputs."""
+    args = {"k": 2, "spec": T("int64", (2, 3), layout=layout), "group": "world", "async_op": False}
+    if op == "all_reduce_coalesced":
+        args["op"] = "SUM"
+    res, fs, info = run([C(op, args, {"outs": "l1"})])
+    assert fs == [] and info["checked"], (fs, info)
+
+
+def test_TP_gather_object_valid():
+    """gather_object to root rank."""
+    calls = [
+        C("gather_object", {"seed": 42, "root": 1, "root_mode": "global", "group": "world"}, {"outs": "l1"}),
+    ]
+    res, fs, info = run(calls)
+    assert res["kind"] == "ok" and fs == [], (res, fs, info)
+
+
+def test_TP_scatter_object_list_valid():
+    """scatter_object_list from root."""
+    calls = [
+        C(
+            "scatter_object_list",
+            {"seed": 99, "k": 2, "root": 0, "root_mode": "global", "group": "world"},
+            {"out": "l1"},
+        ),
+    ]
+    res, fs, info = run(calls)
+    assert res["kind"] == "ok" and fs == [], (res, fs, info)
