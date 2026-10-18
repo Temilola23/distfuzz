@@ -23,6 +23,10 @@ def main():
         default="py",
         help="coverage that admits programs to the corpus in guided mode; cxx needs the distfuzz:cov image",
     )
+    f.add_argument("--gen-prob", type=float, default=0.1, help="guided mode: chance an ordinary pick generates")
+    f.add_argument(
+        "--smash", type=int, default=0, help="guided mode: mutations in a row for each newly admitted program"
+    )
     f.add_argument("--out", required=True)
     c = sub.add_parser("campaign", help="fuzz in rounds that alternate random and guided; resumable")
     c.add_argument("--rounds", type=int, default=6)
@@ -62,6 +66,8 @@ def main():
             seed=a.seed,
             fault=a.fault,
             signal=a.signal,
+            gen_prob=a.gen_prob,
+            smash=a.smash,
         )
         print(json.dumps(fz.run(a.minutes * 60)))
     elif a.cmd == "campaign":
