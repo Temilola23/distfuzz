@@ -44,7 +44,13 @@ def _rank_main(rank, world, port, conn, cfg):
 
     timeout = cfg["timeout"]
     dist.init_process_group("gloo", rank=rank, world_size=world, timeout=timedelta(seconds=max(timeout, 10)))
-    cov = interp.Coverage() if cfg["coverage"] else None
+    covs = []
+    if "py" in cfg["signals"]:
+        covs.append(interp.Coverage())
+    if "cxx" in cfg["signals"]:
+        from .cxxcov import CxxCoverage
+
+        covs.append(CxxCoverage())
     conn.send(("ready", rank))
     nprog = 0
     while True:
@@ -65,18 +71,35 @@ def _rank_main(rank, world, port, conn, cfg):
                     dist.destroy_process_group(g)
         except Exception:  # noqa: BLE001
             res["executor_error"] = traceback.format_exc()[-2000:]
-        if cov is not None:
-            res["cov"] = cov.take()
+        if covs:
+            res["cov"] = set().union(*(c.take() for c in covs))
         conn.send(("result", rank, res))
     with suppress(Exception):
         dist.destroy_process_group()
+
+
+SIGNALS = ("py", "cxx", "py+cxx")
+
+
+def signals(coverage):
+    """Coverage kinds to collect: False for none, True for Python lines, or one of SIGNALS."""
+    if coverage is False:
+        return set()
+    if coverage is True:
+        return {"py"}
+    if coverage not in SIGNALS:
+        raise ValueError(f"coverage must be a bool or one of {SIGNALS}, got {coverage!r}")
+    return set(coverage.split("+"))
 
 
 class Session:
     def __init__(self, world=4, timeout=TIMEOUT, detail=False, coverage=True, logdir=None, hang_deadline=None):
         self.world = world
         self.cfg = dict(
-            timeout=timeout, detail=detail, coverage=coverage, logdir=logdir or tempfile.mkdtemp(prefix="distfuzz-")
+            timeout=timeout,
+            detail=detail,
+            signals=signals(coverage),
+            logdir=logdir or tempfile.mkdtemp(prefix="distfuzz-"),
         )
         self.hang_deadline = hang_deadline or (6 * timeout + 10)
         self.procs, self.conns = [], []
