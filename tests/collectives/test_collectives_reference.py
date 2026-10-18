@@ -524,6 +524,17 @@ def test_generate_and_mutate_keep_programs_well_formed(seed):
         json.dumps(q)  # serialisable
 
 
+@pytest.mark.parametrize("weight,diverges", [(0, False), (6, True)])
+def test_diverge_weight_zero_never_makes_rank_divergent_programs(weight, diverges):
+    rng = random.Random(0)
+    g = P.Generator(4, rng)
+    m = P.Mutator(4, rng, diverge_weight=weight)
+    corpus = [g.generate() for _ in range(5)]
+    for _ in range(300):
+        corpus.append(m.mutate(rng.choice(corpus), corpus))  # mutants of mutants, as in guided mode
+    assert any(P.has_divergence(q) for q in corpus) == diverges
+
+
 def test_analyze_counter_exceeds_every_var():
     p = {
         "world": 4,

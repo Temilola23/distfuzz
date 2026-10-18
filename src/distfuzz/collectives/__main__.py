@@ -27,6 +27,9 @@ def main():
     f.add_argument(
         "--smash", type=int, default=0, help="guided mode: mutations in a row for each newly admitted program"
     )
+    f.add_argument(
+        "--diverge-weight", type=int, default=6, help="guided mode: weight of the mutation that makes ranks differ"
+    )
     f.add_argument("--out", required=True)
     c = sub.add_parser("campaign", help="fuzz in rounds that alternate random and guided; resumable")
     c.add_argument("--rounds", type=int, default=6)
@@ -68,6 +71,7 @@ def main():
             signal=a.signal,
             gen_prob=a.gen_prob,
             smash=a.smash,
+            diverge_weight=a.diverge_weight,
         )
         print(json.dumps(fz.run(a.minutes * 60)))
     elif a.cmd == "campaign":
