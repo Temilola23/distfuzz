@@ -617,16 +617,16 @@ def test_scatter_object_list_valid_program():
         assert ref.lists[r]["l1"] == expected_list
 
 
-def test_send_recv_object_list_valid_program():
+def test_send_recv_object_list_uncertain_p2p():
+    """send/recv_object_list are p2p and not fully modeled in reference."""
     p = {
         "world": 4,
         "calls": [
             call("send_object_list", {"k": 1, "dst": 2, "group": "world"}),
-            call("recv_object_list", {"k": 1, "src": 0, "group": "world"}, {"outs": "l1"}),
         ],
     }
     ref = run_reference(p)
-    assert ref.status == "valid"
+    assert ref.status == "uncertain"
 
 
 # Rank-divergent and uneven shapes

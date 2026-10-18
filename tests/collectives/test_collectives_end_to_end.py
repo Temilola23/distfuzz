@@ -287,3 +287,51 @@ def test_ISO_session_survives_timeout_desync():
             assert r["kind"] == "ok" and info["exc"] == 0 and fs == [], (info, fs)
     finally:
         s.stop(hard=True)
+
+
+# New collective operations
+
+
+def test_TP_all_reduce_coalesced_valid():
+    """all_reduce_coalesced with multiple tensors."""
+    calls = [
+        C("all_reduce_coalesced", {"k": 2, "op": "SUM", "group": "world", "async_op": False}, {"w": "w1"}),
+    ]
+    res, fs, info = run(calls)
+    assert res["kind"] == "ok" and fs == [], (res, fs, info)
+
+
+def test_TP_all_gather_coalesced_valid():
+    """all_gather_coalesced with multiple tensor lists."""
+    calls = [
+        C("tensor", {"spec": T("float32", (2,))}, {"out": "t1"}),
+        C(
+            "all_gather_coalesced",
+            {"k": 2, "out": T("float32", (2,)), "t": "t1", "group": "world", "async_op": False},
+            {"w": "w2", "outs": "l1"},
+        ),
+    ]
+    res, fs, info = run(calls)
+    assert res["kind"] == "ok" and fs == [], (res, fs, info)
+
+
+def test_TP_gather_object_valid():
+    """gather_object to root rank."""
+    calls = [
+        C("gather_object", {"seed": 42, "root": 1, "root_mode": "global", "group": "world"}, {"outs": "l1"}),
+    ]
+    res, fs, info = run(calls)
+    assert res["kind"] == "ok" and fs == [], (res, fs, info)
+
+
+def test_TP_scatter_object_list_valid():
+    """scatter_object_list from root."""
+    calls = [
+        C(
+            "scatter_object_list",
+            {"seed": 99, "k": 2, "root": 0, "root_mode": "global", "group": "world"},
+            {"out": "l1"},
+        ),
+    ]
+    res, fs, info = run(calls)
+    assert res["kind"] == "ok" and fs == [], (res, fs, info)

@@ -533,21 +533,36 @@ class Reference:
         elif op == "all_reduce_coalesced":
             self.same(parts, m, "k")
             self.same(parts, m, "op")
-            for x in m:
-                self.touch(x, set(), set(), asy[x], wv)
+            k = a0["k"]
+            for ki in range(k):
+                spec = A[m[0]].get("t", {"dtype": "float32", "shape": [1]})
+                if isinstance(spec, str):
+                    raise Stop("uncertain", "all_reduce_coalesced tensor spec missing")
+                vals = [Val(T.expected_initial(spec, x, salt(i, f"coalesced_{ki}")), "contig") for x in m]
+                self.same_meta(vals, op)
+                if not op_ok(a0["op"], T.NAME[vals[0].dtype]):
+                    raise Stop("uncertain", f"{a0['op']} on {vals[0].dtype}")
+                for v in vals:
+                    self.check_write(v)
+                res = None if any(v.v is None for v in vals) else reduce_vals(a0["op"], [v.v for v in vals])
+                for x in m:
+                    self.touch(x, set(), set(), asy[x], wv)
         elif op == "all_gather_coalesced":
             self.same(parts, m, "k")
+            k = a0["k"]
+            for ki in range(k):
+                vals = [self.get(x, A[x]["t"]) for x in m]
+                self.same_meta(vals, op)
             for x in m:
-                self.touch(x, set(), rets.get("outs"), asy[x], wv)
-                self.lists[x][rets["outs"]] = [[snapshot(self.get(y, A[y]["t"])) for y in m] for _ in range(a0["k"])]
+                self.touch(x, {A[x]["t"]}, {rets["outs"]}, asy[x], wv)
+                self.lists[x][rets["outs"]] = [[snapshot(self.get(y, A[y]["t"])) for y in m] for _ in range(k)]
         elif op == "gather_object":
             root = root_of()
-            self.same(parts, m, "seed")
-            lst = [{"r": x, "s": A[x]["seed"]} for x in m]
+            objs = [{"r": x, "s": A[x]["seed"]} for x in m]
             for x in m:
                 self.touch(x, set(), set(), asy[x], wv)
             if "outs" in rets:
-                self.lists[root][rets["outs"]] = list(lst)
+                self.lists[root][rets["outs"]] = list(objs)
         elif op == "scatter_object_list":
             root = root_of()
             self.same(parts, m, "k")
@@ -556,15 +571,9 @@ class Reference:
                 self.touch(x, set(), set(), asy[x], wv)
                 self.lists[x][rets["out"]] = list(lst)
         elif op == "send_object_list":
-            self.same(parts, m, "k")
-            for x in m:
-                self.touch(x, set(), set(), asy[x], wv)
+            raise Stop("uncertain", "send_object_list p2p not modeled")
         elif op == "recv_object_list":
-            self.same(parts, m, "k")
-            for x in m:
-                self.touch(x, set(), set(), asy[x], wv)
-                lst = [{"r": "unknown"} for _ in range(a0["k"])]
-                self.lists[x][rets.get("outs")] = lst
+            raise Stop("uncertain", "recv_object_list p2p not modeled")
         else:
             raise Stop("uncertain", f"no reference for {op}")
 
