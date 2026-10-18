@@ -362,6 +362,14 @@ class Reference:
         elif op == "all_gather_into_tensor":
             vals = [self.get(x, A[x]["t"]) for x in m]
             self.same_meta(vals, op)
+            outs = {x: A[x]["out"] for x in m}
+            if len({(o["dtype"], tuple(o["shape"])) for o in outs.values()}) > 1:
+                if len({o["dtype"] for o in outs.values()}) > 1:
+                    raise Stop("invalid", "all_gather_into_tensor dtype differs")
+                out_numels = {math.prod(o["shape"]) for o in outs.values()}
+                if len(out_numels) > 1:
+                    raise Stop("invalid", "all_gather_into_tensor shapes differ (different numel)")
+                raise Stop("uncertain", "all_gather_into_tensor shapes differ (same numel)")
             for x in m:
                 o = A[x]["out"]
                 if o["dtype"] != T.NAME[vals[0].dtype] or math.prod(o["shape"]) != n * vals[0].numel():
@@ -522,6 +530,41 @@ class Reference:
             lst = [{"r": root, "s": A[root]["seed"], "i": k} for k in range(a0["k"])]
             for x in m:
                 self.lists[x][rets["outs"]] = list(lst)
+        elif op == "all_reduce_coalesced":
+            self.same(parts, m, "k")
+            self.same(parts, m, "op")
+            for x in m:
+                self.touch(x, set(), set(), asy[x], wv)
+        elif op == "all_gather_coalesced":
+            self.same(parts, m, "k")
+            for x in m:
+                self.touch(x, set(), rets.get("outs"), asy[x], wv)
+                self.lists[x][rets["outs"]] = [[snapshot(self.get(y, A[y]["t"])) for y in m] for _ in range(a0["k"])]
+        elif op == "gather_object":
+            root = root_of()
+            self.same(parts, m, "seed")
+            lst = [{"r": x, "s": A[x]["seed"]} for x in m]
+            for x in m:
+                self.touch(x, set(), set(), asy[x], wv)
+            if "outs" in rets:
+                self.lists[root][rets["outs"]] = list(lst)
+        elif op == "scatter_object_list":
+            root = root_of()
+            self.same(parts, m, "k")
+            lst = [{"r": root, "s": A[root]["seed"], "i": k} for k in range(a0["k"])]
+            for x in m:
+                self.touch(x, set(), set(), asy[x], wv)
+                self.lists[x][rets["out"]] = list(lst)
+        elif op == "send_object_list":
+            self.same(parts, m, "k")
+            for x in m:
+                self.touch(x, set(), set(), asy[x], wv)
+        elif op == "recv_object_list":
+            self.same(parts, m, "k")
+            for x in m:
+                self.touch(x, set(), set(), asy[x], wv)
+                lst = [{"r": "unknown"} for _ in range(a0["k"])]
+                self.lists[x][rets.get("outs")] = lst
         else:
             raise Stop("uncertain", f"no reference for {op}")
 

@@ -105,6 +105,28 @@ CALLS: dict[str, dict[str, Any]] = {
         rets={"outs": "list"},
         weight=2,
     ),
+    "all_reduce_coalesced": dict(
+        args={"k": ("int", 1, 3), "op": "redop", "group": "group", "async_op": "bool"}, rets={"w": "work"}, weight=4
+    ),
+    "all_gather_coalesced": dict(
+        args={"k": ("int", 1, 3), "out": "tspec", "t": "tensor", "group": "group", "async_op": "bool"},
+        rets={"w": "work", "outs": "list"},
+        weight=3,
+    ),
+    "gather_object": dict(
+        args={"seed": ("int", 0, 99), "root": "root", "root_mode": "root_mode", "group": "group"},
+        rets={"outs": "list"},
+        weight=2,
+    ),
+    "scatter_object_list": dict(
+        args={"seed": ("int", 0, 99), "k": ("int", 1, 3), "root": "root", "root_mode": "root_mode", "group": "group"},
+        rets={"out": "list"},
+        weight=2,
+    ),
+    "send_object_list": dict(args={"k": ("int", 1, 3), "dst": "rank", "group": "group"}, rets={}, weight=2),
+    "recv_object_list": dict(
+        args={"k": ("int", 1, 3), "src": "rank", "group": "group"}, rets={"outs": "list"}, weight=2
+    ),
     # Fault and lifecycle ops: weight 0, so only `--fault` mode (FAULT_WEIGHTS) generates them.
     # The reference model treats them as "uncertain", so only the crash, hang and guard oracles apply.
     "drop_work": dict(args={"w": "work", "gc": "bool"}, rets={}, weight=0, fault=True),
