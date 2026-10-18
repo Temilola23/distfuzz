@@ -38,6 +38,7 @@ class Fuzzer:
         fault=False,
         signal="py",
         triage_runs=2,
+        smash=0,
     ):
         self.outdir = outdir
         self.mode = mode
@@ -56,6 +57,10 @@ class Fuzzer:
         self.sess = Session(world, timeout=timeout, detail=detail, coverage=signal, logdir=os.path.join(outdir, "logs"))
         # fault programs mutate poorly (a crashing prefix keeps crashing), so generate more often
         self.gen_prob = max(gen_prob, 0.35) if fault else gen_prob
+        # syzkaller's smash (SyzVegas, USENIX Security '21, sec. 2.1): a program that just raised coverage gets
+        # `smash` mutations in a row before ordinary picks resume; programs admitted meanwhile wait their turn
+        self.smash = smash
+        self.smashing = deque()
         self.cover = set()
         self.ignore = set()
         self.corpus = []
@@ -80,6 +85,7 @@ class Fuzzer:
             noise=0,
             unstable=0,
             triage_removed=0,
+            smashed=0,
             wall_exec=0.0,
         )
         self.t0 = None
@@ -87,6 +93,12 @@ class Fuzzer:
         self.statf = open(os.path.join(outdir, "stats.jsonl"), "a")
 
     def pick(self):
+        if self.smashing:
+            prog, left = self.smashing.popleft()
+            if left > 1:
+                self.smashing.appendleft((prog, left - 1))
+            self.stats["smashed"] += 1
+            return self.mut.mutate(prog, self.corpus)
         if self.mode == "random" or not self.corpus or self.rng.random() < self.gen_prob:
             return self.gen.generate()
         return self.mut.mutate(self.rng.choice(self.corpus), self.corpus)
@@ -186,6 +198,8 @@ class Fuzzer:
             fh.write(dumps(prog))
         if self.mode == "guided":
             self.corpus.append(prog)
+            if self.smash:
+                self.smashing.append((prog, self.smash))
 
     def covered(self, prog):
         res, _ = self.execute(prog)
