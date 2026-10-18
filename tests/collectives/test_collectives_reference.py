@@ -612,9 +612,9 @@ def test_scatter_object_list_valid_program():
     }
     ref = run_reference(p)
     assert ref.status == "valid"
-    expected_list = [{"r": 0, "s": 99, "i": 0}, {"r": 0, "s": 99, "i": 1}]
     for r in range(4):
-        assert ref.lists[r]["l1"] == expected_list
+        expected = [{"r": 0, "s": 99, "i": r}]
+        assert ref.lists[r]["l1"] == expected
 
 
 def test_send_recv_object_list_uncertain_p2p():

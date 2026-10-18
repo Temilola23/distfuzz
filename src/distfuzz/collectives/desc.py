@@ -119,7 +119,7 @@ CALLS: dict[str, dict[str, Any]] = {
         weight=2,
     ),
     "scatter_object_list": dict(
-        args={"seed": ("int", 0, 99), "k": ("int", 1, 3), "root": "root", "root_mode": "root_mode", "group": "group"},
+        args={"seed": ("int", 0, 99), "root": "root", "root_mode": "root_mode", "group": "group"},
         rets={"out": "list"},
         weight=2,
     ),
