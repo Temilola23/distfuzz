@@ -24,6 +24,15 @@ def main():
         help="coverage that admits programs to the corpus in guided mode; cxx needs the distfuzz:cov image",
     )
     f.add_argument("--out", required=True)
+    c = sub.add_parser("campaign", help="fuzz in rounds that alternate random and guided; resumable")
+    c.add_argument("--rounds", type=int, default=6)
+    c.add_argument("--minutes", type=float, default=10, help="per round")
+    c.add_argument("--world", type=int, default=4)
+    c.add_argument("--timeout", type=float, default=TIMEOUT)
+    c.add_argument("--seed", type=int, default=0, help="round i uses seed + i")
+    c.add_argument("--signal", choices=SIGNALS, default="py")
+    c.add_argument("--known", help="JSON list of signatures, or an earlier campaign's index.json")
+    c.add_argument("--out", required=True)
     b = sub.add_parser("bench")
     b.add_argument("--n", type=int, default=40)
     b.add_argument("--world", type=int, default=4)
@@ -55,6 +64,13 @@ def main():
             signal=a.signal,
         )
         print(json.dumps(fz.run(a.minutes * 60)))
+    elif a.cmd == "campaign":
+        from . import campaign
+
+        known = campaign.load_known(a.known) if a.known else frozenset()
+        print(
+            json.dumps(campaign.run(a.out, a.rounds, a.minutes, a.world, a.timeout, a.seed, a.signal, known), indent=1)
+        )
     elif a.cmd == "bench":
         import random
 
