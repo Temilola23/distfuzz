@@ -530,32 +530,24 @@ class Reference:
             lst = [{"r": root, "s": A[root]["seed"], "i": k} for k in range(a0["k"])]
             for x in m:
                 self.lists[x][rets["outs"]] = list(lst)
-        elif op == "all_reduce_coalesced":
+        elif op in ("all_reduce_coalesced", "all_gather_coalesced"):
             self.same(parts, m, "k")
-            self.same(parts, m, "op")
-            if not op_ok(a0["op"], "float32"):
-                raise Stop("uncertain", f"{a0['op']} invalid")
-            k = a0["k"]
-            for ki in range(k):
-                spec = {"dtype": "float32", "shape": [2], "layout": "contig", "seed": 0, "kind": "int"}
-                vals = [Val(T.expected_initial(spec, x, salt(i, f"coalesced_{ki}")), "contig") for x in m]
-                self.same_meta(vals, op)
-                res = None if any(v.v is None for v in vals) else reduce_vals(a0["op"], [v.v for v in vals])
-            for x in m:
-                self.touch(x, set(), set(), asy[x], wv)
-        elif op == "all_gather_coalesced":
-            self.same(parts, m, "k")
-            k = a0["k"]
-            spec = {"dtype": "float32", "shape": [2], "layout": "contig", "seed": 0, "kind": "int"}
-            for ki in range(k):
-                vals = [Val(T.expected_initial(spec, x, salt(i, f"coalesced_inp_{ki}")), "contig") for x in m]
-                self.same_meta(vals, op)
+            self.same(parts, m, "spec")
+            spec = a0["spec"]
+            if spec["layout"] == "expanded":
+                raise Stop("uncertain", "write into stride-0 expanded tensor")
+            ins = {x: [T.expected_initial(spec, x, salt(i, "in", k)) for k in range(a0["k"])] for x in m}
+            if op == "all_reduce_coalesced":
+                self.same(parts, m, "op")
+                if not op_ok(a0["op"], spec["dtype"]):
+                    raise Stop("uncertain", f"{a0['op']} on {spec['dtype']}")
+                res = [reduce_vals(a0["op"], [ins[x][k] for x in m]) for k in range(a0["k"])]
             for x in m:
                 self.touch(x, set(), {rets["outs"]}, asy[x], wv)
-                self.lists[x][rets["outs"]] = [
-                    [Val(T.expected_initial(spec, y, salt(i, f"coalesced_inp_{ki}")), "contig") for y in m]
-                    for ki in range(k)
-                ]
+                if op == "all_reduce_coalesced":
+                    self.lists[x][rets["outs"]] = [t.clone() for t in res]
+                else:
+                    self.lists[x][rets["outs"]] = [ins[y][k].clone() for y in m for k in range(a0["k"])]
         elif op == "gather_object":
             root = root_of()
             objs = [{"r": x, "s": A[x]["seed"]} for x in m]

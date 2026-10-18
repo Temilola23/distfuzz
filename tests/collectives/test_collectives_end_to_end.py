@@ -292,27 +292,15 @@ def test_ISO_session_survives_timeout_desync():
 # New collective operations
 
 
-def test_TP_all_reduce_coalesced_valid():
-    """all_reduce_coalesced with multiple tensors."""
-    calls = [
-        C("all_reduce_coalesced", {"k": 2, "op": "SUM", "group": "world", "async_op": False}, {"w": "w1"}),
-    ]
-    res, fs, info = run(calls)
-    assert res["kind"] == "ok" and fs == [], (res, fs, info)
-
-
-def test_TP_all_gather_coalesced_valid():
-    """all_gather_coalesced with multiple tensor lists."""
-    calls = [
-        C("tensor", {"spec": T("float32", (2,))}, {"out": "t1"}),
-        C(
-            "all_gather_coalesced",
-            {"k": 2, "out": T("float32", (2,)), "t": "t1", "group": "world", "async_op": False},
-            {"w": "w2", "outs": "l1"},
-        ),
-    ]
-    res, fs, info = run(calls)
-    assert res["kind"] == "ok" and fs == [], (res, fs, info)
+@pytest.mark.parametrize("layout", ["contig", "offset", "noncontig"])
+@pytest.mark.parametrize("op", ["all_reduce_coalesced", "all_gather_coalesced"])
+def test_TP_coalesced_matches_reference(op, layout):
+    """Every gathered or reduced value is checked against the reference, including strided inputs."""
+    args = {"k": 2, "spec": T("int64", (2, 3), layout=layout), "group": "world", "async_op": False}
+    if op == "all_reduce_coalesced":
+        args["op"] = "SUM"
+    res, fs, info = run([C(op, args, {"outs": "l1"})])
+    assert fs == [] and info["checked"], (fs, info)
 
 
 def test_TP_gather_object_valid():

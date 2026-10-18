@@ -257,15 +257,14 @@ def exec_call(i, c, env: RankEnv):
         dist.broadcast_object_list(lst, **kw)
         env.lists[rets["outs"]] = lst
     elif op == "all_reduce_coalesced":
-        spec = {"dtype": "float32", "shape": [2], "layout": "contig", "seed": 0, "kind": "int"}
-        ts = [env.mk(spec, salt(i, f"coalesced_{k}")).view for k in range(a["k"])]
+        ts = [env.mk(a["spec"], salt(i, "in", k)).view for k in range(a["k"])]
+        env.lists[rets["outs"]] = ts
         work = dist.all_reduce_coalesced(ts, op=RO[a["op"]], async_op=asy, **kw)
     elif op == "all_gather_coalesced":
-        spec = {"dtype": "float32", "shape": [2], "layout": "contig", "seed": 0, "kind": "int"}
-        outs = [[env.mk(spec, salt(i, f"coalesced_outs_{j}_{k}")).view for k in range(n)] for j in range(a["k"])]
-        inp = [env.mk(spec, salt(i, f"coalesced_inp_{j}")).view for j in range(a["k"])]
-        env.lists[rets["outs"]] = inp
-        work = dist.all_gather_coalesced(outs, inp, async_op=asy, **kw)
+        ins = [env.mk(a["spec"], salt(i, "in", k)).view for k in range(a["k"])]
+        outs = [[torch.empty_like(t, memory_format=torch.contiguous_format) for t in ins] for _ in range(n)]
+        env.lists[rets["outs"]] = [t for per_rank in outs for t in per_rank]  # rank-major
+        work = dist.all_gather_coalesced(outs, ins, async_op=asy, **kw)
     elif op == "gather_object":
         root = resolve_root(a, mem, rank)
         gl = None if root != rank else [None] * n

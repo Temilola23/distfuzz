@@ -7,7 +7,9 @@ import torch
 
 from distfuzz.collectives import oracle
 from distfuzz.collectives import prog as P
+from distfuzz.collectives import tensors as T_
 from distfuzz.collectives.reference import Val, op_ok, reduce_vals, run_reference
+from distfuzz.collectives.semantics import salt
 
 
 def T(dtype="float32", shape=(2,), layout="contig", seed=1, kind="int"):
@@ -547,31 +549,30 @@ def test_new_group_out_of_range_ranks_is_uncertain_not_valid():
 # New coalesced and object collectives
 
 
-def test_all_reduce_coalesced_valid_program():
-    p = {
-        "world": 4,
-        "calls": [
-            call("all_reduce_coalesced", {"k": 2, "op": "SUM", "group": "world", "async_op": False}, {"w": "w1"}),
-        ],
-    }
+@pytest.mark.parametrize("op", ["all_reduce_coalesced", "all_gather_coalesced"])
+def test_coalesced_reference_values(op):
+    spec = T("int64", (2, 3), layout="noncontig")
+    args = {"k": 2, "spec": spec, "group": "world", "async_op": False}
+    if op == "all_reduce_coalesced":
+        args["op"] = "SUM"
+    p = {"world": 4, "calls": [call(op, args, {"outs": "l1"})]}
     ref = run_reference(p)
     assert ref.status == "valid"
+    ins = [[T_.expected_initial(spec, r, salt(0, "in", k)) for k in range(2)] for r in range(4)]
+    want = (
+        [ins[0][k] + ins[1][k] + ins[2][k] + ins[3][k] for k in range(2)]
+        if op == "all_reduce_coalesced"
+        else [ins[r][k] for r in range(4) for k in range(2)]
+    )
+    for r in range(4):
+        got = ref.lists[r]["l1"]
+        assert len(got) == len(want) and all(torch.equal(g, w) for g, w in zip(got, want))
 
 
-def test_all_gather_coalesced_valid_program():
-    p = {
-        "world": 4,
-        "calls": [
-            call("tensor", {"spec": T()}, {"out": "t1"}),
-            call(
-                "all_gather_coalesced",
-                {"k": 2, "out": T(), "t": "t1", "group": "world", "async_op": False},
-                {"w": "w2", "outs": "l1"},
-            ),
-        ],
-    }
-    ref = run_reference(p)
-    assert ref.status == "valid"
+def test_coalesced_ranks_disagreeing_on_spec_is_invalid():
+    args = {"k": 1, "spec": T(), "op": "SUM", "group": "world", "async_op": False}
+    p = {"world": 4, "calls": [call("all_reduce_coalesced", args, {"outs": "l1"}, div={"2": {"spec": T(shape=(3,))}})]}
+    assert run_reference(p).status == "invalid"
 
 
 def test_gather_object_valid_program():

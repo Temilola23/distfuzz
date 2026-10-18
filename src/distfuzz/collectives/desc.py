@@ -106,10 +106,12 @@ CALLS: dict[str, dict[str, Any]] = {
         weight=2,
     ),
     "all_reduce_coalesced": dict(
-        args={"k": ("int", 1, 3), "op": "redop", "group": "group", "async_op": "bool"}, rets={"w": "work"}, weight=4
+        args={"k": ("int", 1, 3), "spec": "tspec", "op": "redop", "group": "group", "async_op": "bool"},
+        rets={"w": "work", "outs": "list"},
+        weight=4,
     ),
     "all_gather_coalesced": dict(
-        args={"k": ("int", 1, 3), "out": "tspec", "t": "tensor", "group": "group", "async_op": "bool"},
+        args={"k": ("int", 1, 3), "spec": "tspec", "group": "group", "async_op": "bool"},
         rets={"w": "work", "outs": "list"},
         weight=3,
     ),
