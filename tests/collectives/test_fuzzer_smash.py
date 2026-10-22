@@ -1,6 +1,9 @@
-"""Smashing newly admitted programs, driven through a fake executor and a recording mutator."""
+"""Scheduling of guided and random picks: smashing new programs, divergence in generated ones."""
+
+import pytest
 
 from distfuzz.collectives.fuzzer import Fuzzer
+from distfuzz.collectives.prog import has_divergence
 
 
 def T():
@@ -78,3 +81,21 @@ def test_random_mode_never_smashes(tmp_path):
     fz = fuzzer(tmp_path, smash=5, mode="random")
     admit(fz, AR)
     assert fz.corpus == [] and fz.pick() is GENERATED and fz.mutated == []
+
+
+@pytest.mark.parametrize("chance,share", [(0.0, 0.0), (1.0, 1.0)])
+def test_gen_diverge_sets_the_share_of_divergent_generated_programs(tmp_path, chance, share):
+    fz = Fuzzer(str(tmp_path), mode="random", gen_diverge=chance)
+    progs = [fz.pick() for _ in range(200)]
+    assert sum(has_divergence(p) for p in progs) / len(progs) == share
+
+
+def test_gen_diverge_half(tmp_path):
+    fz = Fuzzer(str(tmp_path), mode="random", gen_diverge=0.5, seed=3)
+    n = sum(has_divergence(fz.pick()) for _ in range(400))
+    assert 150 < n < 250
+
+
+def test_diverge_gives_up_on_a_program_that_cannot_diverge(tmp_path):
+    fz = Fuzzer(str(tmp_path))
+    assert fz.mut.diverge({"world": 4, "calls": []}) == {"world": 4, "calls": []}
