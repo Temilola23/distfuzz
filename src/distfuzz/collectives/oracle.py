@@ -115,10 +115,13 @@ def classify(prog, res, ref=None):
             return [], info
         log = res.get("crash_log", "")
         m = re.search(
-            r"(libc\+\+abi[^|]*|Segmentation fault|terminate called[^|]*|EnforceNotMet[^|]*|Fatal Python error[^|]*)",
+            r"(libc\+\+abi[^|]*|Segmentation fault|terminate called[^|]*|EnforceNotMet[^|]*|Fatal Python error[^|]*"
+            r"|Check failed[^|]*)",
             log,
         )
-        head = norm(m.group(1)) if m else f"exitcodes={res.get('exitcodes')}"
+        # which ranks died varies from run to run for the same bug, so only the kinds of death go in the signature
+        codes = sorted({MEMCORRUPT.get(e, f"exit {e}") for e in res.get("exitcodes") or [] if e})
+        head = norm(m.group(1)) if m else "+".join(codes) or "no exit code"
         return [dict(kind="CRASH", sig=f"CRASH|{ref.status}|{head}", detail=log[-1500:])], info
     if res["kind"] == "hang":
         detail = f"stuck ranks {res.get('stuck_ranks')}"

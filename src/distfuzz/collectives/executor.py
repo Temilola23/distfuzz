@@ -10,6 +10,8 @@ import traceback
 from contextlib import suppress
 from multiprocessing.connection import wait as conn_wait
 
+# written to each rank's log before every program, so a crash is read from its own program's output only
+MARK = "@@ distfuzz program"
 TIMEOUT = 2.0  # per-collective; measured cross-rank arrival skew is <= 0.12 s (FINDINGS.md)
 
 
@@ -59,6 +61,7 @@ def _rank_main(rank, world, port, conn, cfg):
             break
         _, prog = msg
         nprog += 1
+        os.write(2, f"{MARK} {nprog}\n".encode())
         res = {}
         try:
             # resync the group-name counter so a desynchronised new_group() in an earlier program can't leak
@@ -169,8 +172,12 @@ class Session:
             try:
                 with open(os.path.join(d, f"rank{r}.log"), "rb") as f:
                     f.seek(0, 2)
-                    f.seek(max(0, f.tell() - 3000))
-                    tail = f.read().decode(errors="replace").splitlines()
+                    f.seek(max(0, f.tell() - 65536))
+                    log = f.read().decode(errors="replace")
+                # the log spans every program since the rank started; earlier programs' errors are not this crash
+                if MARK in log:
+                    log = log.rsplit(MARK, 1)[1].split("\n", 1)[-1]
+                tail = log.splitlines()
                 keep = [ln for ln in tail if "Warning" not in ln and "warn(" not in ln][-8:]
                 out.append(f"[rank {r}] " + " | ".join(keep))
             except OSError:
