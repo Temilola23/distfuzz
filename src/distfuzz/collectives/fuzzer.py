@@ -39,6 +39,7 @@ class Fuzzer:
         signal="py",
         triage_runs=2,
         smash=0,
+        gen_diverge=0.0,
     ):
         self.outdir = outdir
         self.mode = mode
@@ -60,6 +61,8 @@ class Fuzzer:
         # syzkaller's smash (SyzVegas, USENIX Security '21, sec. 2.1): a program that just raised coverage gets
         # `smash` mutations in a row before ordinary picks resume; programs admitted meanwhile wait their turn
         self.smash = smash
+        # chance that a generated (not mutated) program is made rank-divergent; the generator never does it itself
+        self.gen_diverge = gen_diverge
         self.smashing = deque()
         self.cover = set()
         self.ignore = set()
@@ -100,7 +103,8 @@ class Fuzzer:
             self.stats["smashed"] += 1
             return self.mut.mutate(prog, self.corpus)
         if self.mode == "random" or not self.corpus or self.rng.random() < self.gen_prob:
-            return self.gen.generate()
+            p = self.gen.generate()
+            return self.mut.diverge(p) if self.rng.random() < self.gen_diverge else p
         return self.mut.mutate(self.rng.choice(self.corpus), self.corpus)
 
     def record_finding(self, f, prog, res, info):

@@ -522,6 +522,16 @@ class Mutator:
             return False
         return True
 
+    def diverge(self, p):
+        """A copy of p with one or two calls made rank-divergent, as the diverge mutation does."""
+        p = copy.deepcopy(p)
+        want = 1 + (self.rng.random() < 0.5)
+        for _ in range(20):  # bounded: a program whose calls take no arguments cannot diverge
+            want -= self._diverge(p, ())
+            if want <= 0:
+                break
+        return sanitize(p)
+
     def _diverge(self, p, corpus):
         if not p["calls"]:
             return False
