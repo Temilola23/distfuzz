@@ -298,6 +298,8 @@ class Generator:
         elif op == "p2p":
             a["t"] = self.need_tensor(st, pre)
             a["src"], a["dst"] = r.sample(range(self.world), 2)
+        elif op == "p2p_object":
+            a["src"], a["dst"] = r.sample(range(self.world), 2)
         elif op == "ring":
             a["t"] = self.need_tensor(st, pre)
         rets = {}

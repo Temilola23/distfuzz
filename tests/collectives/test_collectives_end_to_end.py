@@ -303,6 +303,16 @@ def test_TP_coalesced_matches_reference(op, layout):
     assert fs == [] and info["checked"], (fs, info)
 
 
+def test_TP_p2p_object_matches_reference_without_waiting():
+    """Regression: send_object_list and recv_object_list were separate calls run on every rank, so a recv had no
+    sender and waited out the collective timeout, and send_object_list raised KeyError before sending."""
+    calls = [C("p2p_object", {"seed": 5, "k": 3, "src": 2, "dst": 0}, {"outs": "l1"})]
+    res, fs, info = run(calls)
+    assert res["kind"] == "ok" and fs == [] and info["checked"], (res, fs, info)
+    assert not any(r.get("exc") for r in res["results"])
+    assert res["wall"] < 1.0, res["wall"]
+
+
 def test_TP_gather_object_valid():
     """gather_object to root rank."""
     calls = [

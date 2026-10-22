@@ -168,6 +168,14 @@ def exec_call(i, c, env: RankEnv):
         for r in dist.batch_isend_irecv(ops):
             r.wait()
         return
+    if op == "p2p_object":
+        if rank == a["src"]:
+            dist.send_object_list([{"r": rank, "s": a["seed"], "i": k} for k in range(a["k"])], a["dst"], group=env.pg)
+        out = [None] * a["k"]
+        if rank == a["dst"]:
+            dist.recv_object_list(out, a["src"], group=env.pg)
+        env.lists[rets["outs"]] = out
+        return
 
     grp, mem = env.G(a["group"])
     n = len(mem) if mem else 0
@@ -286,13 +294,6 @@ def exec_call(i, c, env: RankEnv):
             kw["src"] = a["root"]
         dist.scatter_object_list(so, si, **kw)
         env.lists[rets["out"]] = so
-    elif op == "send_object_list":
-        sl = [{"r": rank, "s": a["seed"], "i": k} for k in range(a["k"])]
-        dist.send_object_list(sl, a["dst"], group=env.pg)
-    elif op == "recv_object_list":
-        rl = [None] * a["k"]
-        dist.recv_object_list(rl, a["src"], group=env.pg)
-        env.lists[rets["outs"]] = rl
     else:
         raise ValueError(op)
     if "w" in rets:
