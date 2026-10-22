@@ -235,6 +235,30 @@ class Reference:
                 for r in range(W):
                     self.groups[r][rets["g"]] = list(range((r // s) * s, (r // s) * s + s))
             return
+        if op == "p2p_object":
+            sends, recvs = {}, {}
+            for r in range(W):
+                a = eff[r]
+                if a is None:
+                    continue
+                if not (0 <= a["src"] < W and 0 <= a["dst"] < W) or a["src"] == a["dst"]:
+                    if r in (a["src"], a["dst"]):
+                        raise Stop("uncertain", "bad p2p peer")
+                    continue
+                if r == a["src"]:
+                    sends[(r, a["dst"])] = a
+                if r == a["dst"]:
+                    recvs[(a["src"], r)] = a
+            if sorted(sends) != sorted(recvs):
+                raise Stop("invalid", "unmatched send/recv")
+            for r in range(W):
+                if eff[r] is not None:
+                    self.lists[r][rets["outs"]] = [None] * eff[r]["k"]
+            for (s, d), a in sends.items():
+                if recvs[(s, d)]["k"] != a["k"]:
+                    raise Stop("uncertain", "p2p_object list lengths differ")
+                self.lists[d][rets["outs"]] = [{"r": s, "s": a["seed"], "i": i} for i in range(a["k"])]
+            return
         if op == "p2p":
             sends, recvs = [], []
             for r in range(W):
@@ -562,10 +586,6 @@ class Reference:
                 self.touch(x, set(), set(), asy[x], wv)
                 obj = lst[m.index(x)] if x in m else {"r": root}
                 self.lists[x][rets["out"]] = [obj]
-        elif op == "send_object_list":
-            raise Stop("uncertain", "send_object_list p2p not modeled")
-        elif op == "recv_object_list":
-            raise Stop("uncertain", "recv_object_list p2p not modeled")
         else:
             raise Stop("uncertain", f"no reference for {op}")
 

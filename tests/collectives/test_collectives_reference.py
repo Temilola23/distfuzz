@@ -629,16 +629,28 @@ def test_scatter_object_list_valid_program():
         assert ref.lists[r]["l1"] == expected
 
 
-def test_send_recv_object_list_uncertain_p2p():
-    """send/recv_object_list are p2p and not fully modeled in reference."""
+def test_p2p_object_dst_receives_src_objects_others_untouched():
+    p = {"world": 4, "calls": [call("p2p_object", {"seed": 7, "k": 2, "src": 1, "dst": 3}, {"outs": "l1"})]}
+    ref = run_reference(p)
+    assert ref.status == "valid"
+    assert ref.lists[3]["l1"] == [{"r": 1, "s": 7, "i": 0}, {"r": 1, "s": 7, "i": 1}]
+    assert all(ref.lists[r]["l1"] == [None, None] for r in (0, 1, 2))
+
+
+def test_p2p_object_ranks_disagreeing_on_dst_is_invalid():
+    """Rank 1 sends to 3, but rank 3 thinks it is not the receiver: the send has no matching recv."""
     p = {
         "world": 4,
         "calls": [
-            call("send_object_list", {"k": 1, "dst": 2, "group": "world"}),
+            call(
+                "p2p_object",
+                {"seed": 7, "k": 1, "src": 1, "dst": 3},
+                {"outs": "l1"},
+                div={"3": {"dst": 2}, "2": {"dst": 2}},
+            )
         ],
     }
-    ref = run_reference(p)
-    assert ref.status == "uncertain"
+    assert run_reference(p).status == "invalid"
 
 
 # Rank-divergent and uneven shapes

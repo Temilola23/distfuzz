@@ -125,9 +125,9 @@ CALLS: dict[str, dict[str, Any]] = {
         rets={"out": "list"},
         weight=2,
     ),
-    "send_object_list": dict(args={"k": ("int", 1, 3), "dst": "rank", "group": "group"}, rets={}, weight=2),
-    "recv_object_list": dict(
-        args={"k": ("int", 1, 3), "src": "rank", "group": "group"}, rets={"outs": "list"}, weight=2
+    # send_object_list on src paired with recv_object_list on dst in one call, as p2p does for tensors
+    "p2p_object": dict(
+        args={"seed": ("int", 0, 99), "k": ("int", 1, 3), "src": "rank", "dst": "rank"}, rets={"outs": "list"}, weight=2
     ),
     # Fault and lifecycle ops: weight 0, so only `--fault` mode (FAULT_WEIGHTS) generates them.
     # The reference model treats them as "uncertain", so only the crash, hang and guard oracles apply.
