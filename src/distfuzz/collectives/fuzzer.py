@@ -39,7 +39,7 @@ class Fuzzer:
         signal="py",
         triage_runs=2,
         smash=0,
-        gen_diverge=0.0,
+        gen_diverge=0.25,
     ):
         self.outdir = outdir
         self.mode = mode
