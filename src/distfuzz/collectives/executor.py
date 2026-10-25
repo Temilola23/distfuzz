@@ -15,6 +15,8 @@ MARK = "@@ distfuzz program"
 # per-collective. Measured cross-rank arrival skew is <= 0.12 s (FINDINGS.md); a call that raises on some ranks
 # leaves the others waiting this long (Gloo has no way to wake them), which dominated run time at 2.0
 TIMEOUT = 0.5
+# a new finding that involved a timeout must reproduce at this one before it is reported (Fuzzer.confirm)
+CONFIRM_TIMEOUT = 4.0
 
 
 def _free_port():
@@ -61,7 +63,7 @@ def _rank_main(rank, world, port, conn, cfg):
         msg = conn.recv()
         if msg[0] == "exit":
             break
-        _, prog = msg
+        _, prog, timeout = msg
         nprog += 1
         os.write(2, f"{MARK} {nprog}\n".encode())
         res = {}
@@ -191,14 +193,16 @@ class Session:
         self.restarts += 1
         self.start()
 
-    def run(self, prog):
+    def run(self, prog, timeout=None):
+        """Run one program on every rank; `timeout` overrides the per-collective timeout for this program only."""
         if not self.started:
             self.start()
+        to = timeout or self.cfg["timeout"]
         t0 = time.time()
         sent = True
         try:
             for c in self.conns:
-                c.send(("run", prog))
+                c.send(("run", prog, to))
         except OSError:
             sent = False
         dead = [r for r, p in enumerate(self.procs) if not p.is_alive()]
@@ -217,7 +221,7 @@ class Session:
             return out
         results = [None] * self.world
         pending = {self.conns[r]: r for r in range(self.world)}
-        dl = t0 + self.hang_deadline
+        dl = t0 + (self.hang_deadline if timeout is None else 6 * to + 10)
         kind = "ok"
         while pending:
             left = dl - time.time()
@@ -239,7 +243,7 @@ class Session:
                     pending.pop(c)
                     kind = "crash"
             if kind == "crash":
-                dl = min(dl, time.time() + 2 * self.cfg["timeout"] + 2)
+                dl = min(dl, time.time() + 2 * to + 2)
         out = {
             "kind": kind,
             "results": results,

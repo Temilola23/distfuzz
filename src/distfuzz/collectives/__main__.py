@@ -3,7 +3,7 @@ import json
 import os
 import time
 
-from .executor import SIGNALS, TIMEOUT
+from .executor import CONFIRM_TIMEOUT, SIGNALS, TIMEOUT
 
 
 def main():
@@ -31,6 +31,12 @@ def main():
         "--diverge-weight", type=int, default=6, help="guided mode: weight of the mutation that makes ranks differ"
     )
     f.add_argument("--gen-diverge", type=float, default=0.25, help="chance a generated program is made rank-divergent")
+    f.add_argument(
+        "--confirm-timeout",
+        type=float,
+        default=CONFIRM_TIMEOUT,
+        help="re-run new findings that involved a timeout at this timeout and drop those that do not recur; 0 = off",
+    )
     f.add_argument("--out", required=True)
     c = sub.add_parser("campaign", help="fuzz in rounds that alternate random and guided; resumable")
     c.add_argument("--rounds", type=int, default=6)
@@ -74,6 +80,7 @@ def main():
             smash=a.smash,
             diverge_weight=a.diverge_weight,
             gen_diverge=a.gen_diverge,
+            confirm_timeout=a.confirm_timeout,
         )
         print(json.dumps(fz.run(a.minutes * 60)))
     elif a.cmd == "campaign":
