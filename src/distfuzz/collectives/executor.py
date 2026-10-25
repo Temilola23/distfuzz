@@ -12,7 +12,9 @@ from multiprocessing.connection import wait as conn_wait
 
 # written to each rank's log before every program, so a crash is read from its own program's output only
 MARK = "@@ distfuzz program"
-TIMEOUT = 2.0  # per-collective; measured cross-rank arrival skew is <= 0.12 s (FINDINGS.md)
+# per-collective. Measured cross-rank arrival skew is <= 0.12 s (FINDINGS.md); a call that raises on some ranks
+# leaves the others waiting this long (Gloo has no way to wake them), which dominated run time at 2.0
+TIMEOUT = 0.5
 
 
 def _free_port():
