@@ -38,7 +38,7 @@ class FakeSession:
 
 def fuzzer(tmp_path, smash, mode="guided"):
     """Ordinary picks always generate (gen_prob=1), so any mutation must come from the smash queue."""
-    fz = Fuzzer(str(tmp_path), mode=mode, signal="cxx", smash=smash, gen_prob=1.0)
+    fz = Fuzzer(str(tmp_path), mode=mode, signal="cxx", smash=smash, gen_prob=1.0, gen_diverge=0.0)
     fz.sess, fz.t0 = FakeSession(), 0.0
     fz.mutated = []
     fz.mut.mutate = lambda p, corpus=(): fz.mutated.append(p) or p
