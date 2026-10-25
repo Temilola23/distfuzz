@@ -7,7 +7,7 @@ import random
 import time
 from collections import deque
 
-from .executor import TIMEOUT, Session
+from .executor import CONFIRM_TIMEOUT, TIMEOUT, Session
 from .oracle import classify
 from .prog import Generator, Mutator, dumps, has_divergence, sanitize
 
@@ -40,6 +40,7 @@ class Fuzzer:
         triage_runs=2,
         smash=0,
         gen_diverge=0.25,
+        confirm_timeout=CONFIRM_TIMEOUT,
     ):
         self.outdir = outdir
         self.mode = mode
@@ -63,6 +64,7 @@ class Fuzzer:
         self.smash = smash
         # chance that a generated (not mutated) program is made rank-divergent; the generator never does it itself
         self.gen_diverge = gen_diverge
+        self.confirm_timeout = confirm_timeout
         self.smashing = deque()
         self.cover = set()
         self.ignore = set()
@@ -89,6 +91,8 @@ class Fuzzer:
             unstable=0,
             triage_removed=0,
             smashed=0,
+            confirm_runs=0,
+            unconfirmed=0,
             wall_exec=0.0,
         )
         self.t0 = None
@@ -179,11 +183,33 @@ class Fuzzer:
         self.stats["exc_progs"] += bool(info.get("exc"))
         self.stats["timeouts"] += info.get("timeouts", 0)
         self.stats["detail_mismatch"] += info.get("detail_mismatch", 0)
+        if self.confirm_timeout and info.get("timeouts") and any(f["sig"] not in self.findings for f in findings):
+            findings = self.confirm(prog, findings)
         for f in findings:
             self.record_finding(f, prog, res, info)
         if res["kind"] != "ok":
             self.history.clear()
         return res, (self.new_cover(res) if res["kind"] == "ok" else set())
+
+    def confirm(self, prog, findings):
+        """Re-run a program whose new findings involved a collective timeout, at `confirm_timeout`.
+
+        A short timeout can fire on a rank that was only slow (a loaded machine), not stuck. New findings that do not
+        come back at the longer timeout are dropped and logged to unconfirmed.jsonl; known ones are kept as they are.
+        """
+        t = time.time()
+        res = self.sess.run(prog, timeout=self.confirm_timeout)
+        self.stats["wall_exec"] += time.time() - t
+        self.stats["confirm_runs"] += 1
+        again = {f["sig"] for f in classify(prog, res)[0]}
+        kept = [f for f in findings if f["sig"] in self.findings or f["sig"] in again]
+        dropped = [f for f in findings if f not in kept]
+        self.stats["unconfirmed"] += len(dropped)
+        if dropped:
+            with open(os.path.join(self.outdir, "unconfirmed.jsonl"), "a") as fh:
+                for f in dropped:
+                    fh.write(json.dumps(dict(sig=f["sig"], t=time.time() - self.t0, again=sorted(again))) + "\n")
+        return kept
 
     def step(self):
         prog = self.pick()
