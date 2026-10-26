@@ -20,6 +20,7 @@ Plain PyTorch scripts, no distfuzz imports. Run them in the Docker image (`make 
 | DTensor A7 `_MaskPartial` reduced twice | `dtensor/cases.py` | `python cases.py embedding_full_tensor_twice` |
 | DTensor A8 backward through `split()[k]` | `dtensor/cases.py` | `python cases.py split_backward` |
 | DTensor A9 `squeeze()` on zero-size moves the shard dim | `dtensor/cases.py` | `python cases.py squeeze_zero_size` |
+| DTensor A10 embedding with an empty row shard | `dtensor/cases.py` | `python cases.py embedding_empty_shard` |
 | DCP A1 `flatten_state_dict=False` drops loaded values | `dcp/noflat_drops_values.py` | `python noflat_drops_values.py` |
 | DCP A2 flattened optimizer state + full state dict `KeyError` | `dcp/flat_osd_full_load.py` | `python flat_osd_full_load.py 2 1` |
 | DCP A3 full state dict into a stateless optimizer | `dcp/full_sd_stateless_optim.py` | `python full_sd_stateless_optim.py` |

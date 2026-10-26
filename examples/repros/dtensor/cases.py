@@ -117,6 +117,22 @@ def embedding_full_tensor_twice(rank, mesh):
     show(rank, "embedding 2nd full_tensor", F.embedding(idx, w), out)
 
 
+def embedding_empty_shard(rank, mesh):
+    """A10: embedding with a row-sharded weight where one rank's shard is empty (5 rows on 4 ranks): that rank
+    raises in index_select, the others then fail inside the collective."""
+    w = torch.randn(5, 3)
+    idx = torch.tensor([1, 4])
+    dw = distribute_tensor(w, mesh, [Shard(0)])
+    didx = distribute_tensor(idx, mesh, [Replicate()])
+    print(f"[rank {rank}] local rows {dw.to_local().shape[0]}", flush=True)
+    try:
+        out = F.embedding(didx, dw)
+        show(rank, "embedding, empty shard", F.embedding(idx, w), out)
+    except Exception as e:
+        print(f"[rank {rank}] raised {type(e).__name__}: {str(e)[:120]}", flush=True)
+        raise
+
+
 def getitem_partial_max(rank, mesh):
     """Fixed in 2.14: advanced indexing a Partial(max) tensor with a sharded index."""
     full = torch.arange(6.0).reshape(1, 6)
