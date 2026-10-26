@@ -174,8 +174,8 @@ class Gen:
         x = rng.choice(names[-5:] if rng.random() < 0.6 else names)
         t = env[x]
         cat = rng.choices(
-            ["unary", "binary", "reduce", "shape", "matmul", "index", "inplace", "redist", "loss", "compile"],
-            [12, 10, 12, 16, 6, 6, 7, 14, 3, 2 if self.allow_compile else 0],
+            ["unary", "binary", "reduce", "shape", "matmul", "index", "inplace", "redist", "loss", "nn", "compile"],
+            [12, 10, 12, 16, 6, 6, 7, 14, 3, 8, 2 if self.allow_compile else 0],
         )[0]
         return getattr(self, "p_" + cat)(prog, env, names, x, t)
 
@@ -236,6 +236,18 @@ class Gen:
                 "{x}.round()",
                 "{x}.new_zeros(({n},))".replace("{n}", str(r.randint(0, 5))),
                 "{x}.sum() + {x}",
+                "torch.sin({x})",
+                "torch.log1p({x}.abs())",
+                "torch.expm1({x})",
+                "{x}.trunc()",
+                "{x}.frac()",
+                "{x}.square()",
+                "{x}.isfinite()",
+                "{x}.signbit()",
+                "F.leaky_relu({x}, 0.25)",
+                "F.elu({x})",
+                "F.hardsigmoid({x})",
+                "F.relu6({x})",
             ]
         else:
             ops = [
@@ -290,6 +302,13 @@ class Gen:
             "{a}.logical_and({b})",
             "torch.lerp({a}, {b}, 0.5)",
             "{b} - {a}",
+            "torch.fmod({a}, 3)",
+            "torch.fmax({a}.float(), {b}.float())",
+            "torch.hypot({a}.float(), {b}.float())",
+            "torch.logaddexp({a}.float(), {b}.float())",
+            "torch.xlogy({a}.float().abs(), {b}.float().abs())",
+            "torch.copysign({a}.float(), {b}.float())",
+            "torch.heaviside({a}.float(), {b}.float())",
         ]
         a, b = (x, y) if r.random() < 0.8 else (y, x)
         return r.choice(ops).format(a=a, b=b)
@@ -598,6 +617,85 @@ class Gen:
                 f"F.smooth_l1_loss({x}, {y})",
             ]
         )
+
+    def p_nn(self, prog, env, names, x, t):
+        """Ops with their own sharding strategies: foreach lists, norms, conv, pooling, padding, interpolation,
+        order statistics and scatter-views. No attention: on CPU, SDPA dispatches to an op with no strategy."""
+        r = self.rng
+        nd = t.dim()
+        fl = t.is_floating_point() and t.dtype not in (torch.float16, torch.bfloat16)
+        groups = []
+        if nd >= 1:
+            groups += ["order", "scatter"]
+        if t.is_floating_point() or t.dtype in (torch.int64, torch.int32):
+            groups.append("foreach")
+        if fl and nd >= 1:
+            groups.append("float")
+        if fl and nd == 3:
+            groups.append("seq")
+        if not groups:
+            return None
+        g = r.choice(groups)
+        if g in ("order", "scatter", "float"):
+            d = r.randrange(nd)
+            sz = t.shape[d]
+        if g == "order":
+            # values only: the indices of tied integer values are not unique
+            ops = [f"{x}.median(dim={d})[0]", f"{x}.cummin(dim={d})[0]", f"{x}.mode(dim={d})[0]"]
+            if sz:
+                ops.append(f"{x}.kthvalue({r.randint(1, sz)}, dim={d})[0]")
+            return r.choice(ops)
+        if g == "scatter":
+            if not sz:
+                return f"F.pad({x}, ({r.randint(0, 2)}, {r.randint(0, 2)}))"
+            i, s0 = r.randrange(sz), r.randrange(sz)
+            return r.choice(
+                [
+                    f"F.pad({x}, ({r.randint(0, 2)}, {r.randint(0, 2)}))",
+                    f"torch.select_scatter({x}, {x}.select({d}, {i}) * 2, {d}, {i})",
+                    f"torch.slice_scatter({x}, {x}.narrow({d}, {s0}, {sz - s0}) + 1, {d}, {s0})",
+                ]
+            )
+        if g == "foreach":
+            same = [n for n in names if tuple(env[n].shape) == tuple(t.shape) and env[n].dtype == t.dtype]
+            y, k = r.choice(same), r.randrange(2)
+            ops = [
+                f"torch._foreach_add([{x}, {y}], [{y}, {x}])[{k}]",
+                f"torch._foreach_mul([{x}, {y}], 2)[{k}]",
+                f"torch._foreach_maximum([{x}, {y}], [{y}, {x}])[{k}]",
+            ]
+            if fl:
+                ops += [
+                    f"torch._foreach_norm([{x}, {y}])[{k}]",
+                    f"torch._foreach_lerp([{x}, {y}], [{y}, {x}], 0.5)[{k}]",
+                    f"torch._foreach_addcmul([{x}, {y}], [{y}, {x}], [{x}, {y}], value=0.5)[{k}]",
+                    f"torch._foreach_sqrt([{x}.abs(), {y}.abs()])[{k}]",
+                ]
+            return r.choice(ops)
+        if g == "float":
+            ops = [f"torch.logcumsumexp({x}, dim={d})", f"torch.var_mean({x}, dim={d})[0]"]
+            if nd in (2, 3):
+                ops.append(f"torch.diag_embed({x})")
+            if nd == 2:
+                ops += [f"torch.diag({x})", f"torch.diagonal_scatter({x}, torch.diagonal({x}) + 1)"]
+            return r.choice(ops)
+        # "seq": (batch, channels, length)
+        c = t.shape[1]
+        if c and r.random() < 0.2:
+            w = self.partner(prog, env, [r.choice([1, 2, 3]), c, r.choice([1, 2])], self.dtcode(t))
+            return f"F.conv1d({x}, {w})"
+        ops = [
+            f"F.avg_pool1d({x}, {r.choice([1, 2])})",
+            f"F.max_pool1d({x}, {r.choice([1, 2])})",
+            f"F.interpolate({x}, scale_factor=2, mode='nearest')",
+            f"F.interpolate({x}, size={r.choice([2, 4, 5])}, mode='linear')",
+        ]
+        if c:
+            ops += [
+                f"F.group_norm({x}, {r.choice([n for n in (1, 2, 3) if c % n == 0])})",
+                f"F.batch_norm({x}, None, None, training=True)",
+            ]
+        return r.choice(ops)
 
     def p_compile(self, prog, env, names, x, t):
         lam = self.rng.choice(LAMBDAS)

@@ -13,7 +13,7 @@ Roadmap in priority order, then open questions about findings. Effort figures ar
 | 5 | C++ coverage of Gloo and `ProcessGroupGloo.cpp` (`-fsanitize-coverage=trace-pc-guard` or gcov, start with standalone Gloo) | Python-only feedback cannot see where the bugs live; guided mode never beat random | 2 to 3 weeks |
 | 6 | ASan/UBSan build of Gloo and c10d, then TSan for Gloo's threads | Turns the in-flight `resize_` abort and the unconfirmed SIGSEGVs into precise reports. A standalone ASan Gloo (tcp transport) builds; the uv transport needs a patched CMake | 1 to 2 weeks |
 | 7 | Continuous runs: nightly wheel, replay every repro, one-hour campaign, diff signatures | `distfuzz.repro` does one-off bisection; nothing runs on a schedule | 1 week |
-| 8 | API breadth: the 6 remaining c10d calls (`*_coalesced`, `*_object` variants), DTensor `_foreach_*` and fused optimizer ops, NCCL on rented GPUs | 20/26 c10d calls and 86/364 DTensor strategy ops are described; NCCL is what people train on | 1 to 2 weeks each |
+| 8 | API breadth: DTensor fused optimizer ops (`_fused_adam*`), the remaining `_foreach_*` variants, linalg, 2-D and 3-D upsampling; attention needs CUDA (CPU SDPA has no strategy); NCCL on rented GPUs | 26/26 c10d calls and 190 of 632 DTensor strategy ops are reached; NCCL is what people train on | 1 to 2 weeks each |
 | 9 | Choice table: call priorities from shared argument types and corpus co-occurrence | Equivalent of syzkaller's `prog/prio.go`; mutator weights are guesses today | 3 days |
 | 10 | Commit-level bisection between the two releases that bracket a regression | `vector_norm(inf)` on `Partial(max)` is correct on 2.10.0 and wrong from 2.11.0 | 2 days |
 

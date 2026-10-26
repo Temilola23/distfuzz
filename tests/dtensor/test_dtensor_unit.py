@@ -151,6 +151,35 @@ def test_generate_programs_are_ref_valid():
         assert _ref_valid(gen, p), p["steps"]
 
 
+NN_FAMILIES = {
+    "order": r"\.(median|cummin|mode|kthvalue)\(",
+    "scatter": r"F\.pad|select_scatter|slice_scatter",
+    "foreach": r"torch\._foreach_",
+    "float": r"logcumsumexp|var_mean|diag_embed|torch\.diag\(|diagonal_scatter",
+    "seq": r"pool1d|interpolate|group_norm|batch_norm|conv1d",
+}
+
+
+def test_nn_ops_cover_every_family_and_evaluate():
+    gen = Gen(4, random.Random(3))
+    seen = set()
+    for shape, dt in [([3, 4], "f32"), ([2, 3, 4], "f32"), ([5], "i64"), ([0, 3], "f32")]:
+        prog = dict(mesh="1d", inputs=[], steps=[], nv=0)
+        j = gen.new_input(prog, shape, dt)
+        prog["steps"].append(dict(out=gen.fresh_name(prog), expr=f"mk({j})"))
+        for _ in range(60):
+            env = gen.replay(prog)[0]
+            expr = gen.p_nn(prog, env, ["v0"], "v0", env["v0"])
+            # like try_step: an expression may be invalid for this input (median of an empty dim) and is dropped
+            try:
+                out = eval(expr, env)
+            except Exception:
+                continue
+            assert isinstance(out, torch.Tensor), expr
+            seen |= {f for f, pat in NN_FAMILIES.items() if re.search(pat, expr)}
+    assert seen == set(NN_FAMILIES)
+
+
 def test_mutate_programs_are_ref_valid():
     gen = Gen(4, random.Random(11))
     parent = gen.generate()
