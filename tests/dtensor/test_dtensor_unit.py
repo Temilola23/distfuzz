@@ -180,6 +180,14 @@ def test_nn_ops_cover_every_family_and_evaluate():
     assert seen == set(NN_FAMILIES)
 
 
+def test_no_ops_that_depend_on_the_sign_of_zero():
+    # sum over ranks turns -0.0 into +0.0, so these would report false mismatches on Partial(sum) inputs
+    gen = Gen(4, random.Random(5))
+    for _ in range(60):
+        p = gen.generate()
+        assert not [s["expr"] for s in p["steps"] if re.search(r"copysign|signbit", s["expr"])]
+
+
 def test_mutate_programs_are_ref_valid():
     gen = Gen(4, random.Random(11))
     parent = gen.generate()
@@ -222,8 +230,10 @@ def test_mesh_mutation_keeps_malformed_redistribute_targets():
         nv=2,
     )
     bad = 0
-    for _ in range(200):
-        gen.rng = random.Random(gen.rng.random())
+    # about 1 in 100 mutations is a mesh mutation that keeps a malformed target; independent seeds so the count
+    # does not depend on how much randomness other mutations consume
+    for i in range(1000):
+        gen.rng = random.Random(i)
         m = gen.mutate(p)
         if m["mesh"] == "2d":
             for st in m["steps"]:
