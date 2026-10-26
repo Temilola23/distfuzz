@@ -233,6 +233,16 @@ def int_replicate_to_partial(rank, mesh):
     show(rank, "p.clone().copy_(r)", b, p.clone().copy_(r))
 
 
+def conv1d_sharded_weight(rank, mesh):
+    """A12: conv1d with an out-channel-sharded weight: propagation picks Replicate, but the convolution handler
+    runs on the unredistributed shards and labels the result Replicate."""
+    torch.manual_seed(0)
+    x = torch.randint(-4, 5, (4, 3, 9)).float()
+    w = torch.randint(-4, 5, (4, 3, 1)).float()  # one output channel per rank on 4 ranks
+    out = F.conv1d(distribute_tensor(x, mesh, [Replicate()]), distribute_tensor(w, mesh, [Shard(0)]))
+    show(rank, "conv1d, weight Shard(0)", F.conv1d(x, w), out)
+
+
 def main(rank, world, port, name):
     dist.init_process_group(
         "gloo",
