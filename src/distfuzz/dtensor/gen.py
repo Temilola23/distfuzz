@@ -243,11 +243,12 @@ class Gen:
                 "{x}.frac()",
                 "{x}.square()",
                 "{x}.isfinite()",
-                "{x}.signbit()",
                 "F.leaky_relu({x}, 0.25)",
                 "F.elu({x})",
                 "F.hardsigmoid({x})",
                 "F.relu6({x})",
+                # no copysign/signbit: a Partial(sum) cannot keep the sign of a zero, so -0.0 vs +0.0 would be
+                # reported as a value mismatch
             ]
         else:
             ops = [
@@ -307,7 +308,6 @@ class Gen:
             "torch.hypot({a}.float(), {b}.float())",
             "torch.logaddexp({a}.float(), {b}.float())",
             "torch.xlogy({a}.float().abs(), {b}.float().abs())",
-            "torch.copysign({a}.float(), {b}.float())",
             "torch.heaviside({a}.float(), {b}.float())",
         ]
         a, b = (x, y) if r.random() < 0.8 else (y, x)
