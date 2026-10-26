@@ -219,6 +219,20 @@ def squeeze_zero_size(rank, mesh):
     show(rank, "squeeze zero-size", full.squeeze(), out)
 
 
+def int_replicate_to_partial(rank, mesh):
+    """A11: an integer Replicate operand turned into Partial(sum) is split with true division: p + r comes back
+    float, and slice_scatter / copy_ into a Partial(sum) output lose 1 on odd values."""
+    a = torch.tensor([[2, 4, 6], [8, 10, 12]])
+    b = torch.tensor([[11, 13, 15], [17, 19, 21]])
+    p = partial_from(rank, mesh, a)
+    r = distribute_tensor(b, mesh, [Replicate()])
+    show(rank, "p + r", a + b, p + r)
+    show(
+        rank, "slice_scatter(p, r[:1], 0, 1)", torch.slice_scatter(a, b[:1], 0, 1), torch.slice_scatter(p, r[:1], 0, 1)
+    )
+    show(rank, "p.clone().copy_(r)", b, p.clone().copy_(r))
+
+
 def main(rank, world, port, name):
     dist.init_process_group(
         "gloo",
