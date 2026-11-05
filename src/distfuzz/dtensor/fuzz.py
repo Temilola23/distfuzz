@@ -59,7 +59,10 @@ def opname(expr):
     return e[:20]
 
 
-def signature(f):
+def signature(f, backend="gloo"):
+    """Signatures from a backend other than gloo start with "<backend>:"."""
+    if backend != "gloo":
+        return f"{backend}:{signature(f)}"
     kind = f["kind"]
     if kind == "HANG" and f.get("where"):
         return "HANG|" + f["where"]
@@ -79,7 +82,9 @@ def signature(f):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--world", type=int, default=4)
+    ap.add_argument("--world", "--world-size", dest="world", type=int, default=4)
+    ap.add_argument("--device", choices=["cpu", "cuda"], default="cpu", help="cuda runs DTensor on NCCL")
+    ap.add_argument("--backend", choices=["gloo", "nccl"], help="implied by --device; only cpu/gloo and cuda/nccl")
     ap.add_argument("--mode", choices=["guided", "random"], default="guided")
     ap.add_argument("--minutes", type=float, default=30)
     ap.add_argument("--out", default=os.path.join("runs", "dtensor"))
@@ -89,10 +94,13 @@ def main():
     ap.add_argument("--keep-per-sig", type=int, default=20, help="HANG/CRASH programs kept per signature")
     ap.add_argument("--hang-loop-secs", type=float, default=5.0)
     a = ap.parse_args()
+    backend = {"cpu": "gloo", "cuda": "nccl"}[a.device]
+    if a.backend and a.backend != backend:
+        ap.error(f"--device {a.device} runs on {backend}, not {a.backend}")
     os.makedirs(a.out, exist_ok=True)
     rng = random.Random(a.seed)
     gen = Gen(a.world, rng, allow_compile=not a.no_compile)
-    world = World(a.world, os.path.join(a.out, "logs"), loop_secs=a.hang_loop_secs)
+    world = World(a.world, os.path.join(a.out, "logs"), loop_secs=a.hang_loop_secs, device=a.device)
     cov = set()
     corpus = []
     sigs = Counter()
@@ -156,7 +164,7 @@ def main():
             if a.mode == "guided" and status == "ok":
                 corpus.append(prog)
         for f in findings:
-            s = signature(f)
+            s = signature(f, backend)
             kinds_count[f["kind"]] += 1
             if f["kind"] in ("HANG", "CRASH") and kept[s] < a.keep_per_sig:
                 kept[s] += 1
@@ -164,7 +172,8 @@ def main():
                 fhang.write(json.dumps(rec) + "\n")
                 fhang.flush()
             if s not in sigs:
-                fsig.write(json.dumps(dict(sig=s, finding=f, prog=prog, t=time.time() - t0, world=a.world)) + "\n")
+                rec = dict(sig=s, finding=f, prog=prog, t=time.time() - t0, world=a.world, device=a.device)
+                fsig.write(json.dumps(rec) + "\n")
                 fsig.flush()
                 if any(k in f["kind"] for k in BUG_KINDS):
                     print(f"[{time.time() - t0:7.1f}s] NEW {s}", flush=True)
@@ -188,7 +197,10 @@ def main():
             print(json.dumps(st), flush=True)
     world.close()
     fhang.close()
-    json.dump(dict(sigs=sigs, cov=sorted(cov)), open(os.path.join(a.out, "summary.json"), "w"))
+    json.dump(
+        dict(sigs=sigs, cov=sorted(cov), device=a.device, backend=backend),
+        open(os.path.join(a.out, "summary.json"), "w"),
+    )
 
 
 if __name__ == "__main__":

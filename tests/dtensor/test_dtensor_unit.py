@@ -469,3 +469,15 @@ def test_opname_torch_ops_namespace():
     assert opname("torch.ops.aten._safe_softmax(v1, 0)") == "_safe_softmax"
     assert opname("torch.ops.prims.view_of(v0)") == "view_of"
     assert opname("torch.ops.aten.norm.ScalarOpt_dim(v1, 2, [0])") == "norm"
+
+
+def test_signature_names_a_non_gloo_backend():
+    f = dict(kind="MISMATCH", step=1, expr="v1.sum(0)", msg="values differ at [[0]]")
+    assert signature(f, "nccl") == "nccl:" + signature(f) and not signature(f).startswith("gloo")
+
+
+def test_world_refuses_an_unknown_device(tmp_path):
+    from distfuzz.dtensor.world import World
+
+    with pytest.raises(ValueError):
+        World(2, str(tmp_path), device="mps")
