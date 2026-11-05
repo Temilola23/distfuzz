@@ -76,7 +76,7 @@ def _rank_main(rank, world, port, conn, cfg):
         backend, rank=rank, world_size=world, timeout=timedelta(seconds=max(timeout, 10)), device_id=dev
     )
     covs = []
-    if "py" in cfg["signals"]:
+    if "py" in cfg["signals"] and hasattr(sys, "monitoring"):  # Python < 3.12 (some notebook images): no coverage
         covs.append(interp.Coverage())
     if "cxx" in cfg["signals"]:
         from .cxxcov import CxxCoverage

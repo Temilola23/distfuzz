@@ -41,7 +41,7 @@ torch._dynamo.config.accumulated_cache_size_limit = 4096
 
 COV_NEW: set[str] = set()
 TARGET = os.sep + os.path.join("torch", "distributed", "tensor") + os.sep
-if args.cov:
+if args.cov and hasattr(sys, "monitoring"):  # Python < 3.12 (some notebook images): run without coverage
     mon = sys.monitoring  # type: ignore[attr-defined]  # coverage needs Python 3.12+
     TOOL = 4
     mon.use_tool_id(TOOL, "dtfuzz")
