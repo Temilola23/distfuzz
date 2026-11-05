@@ -38,7 +38,7 @@ class Script:
         return Session()
 
 
-def classify(prog, res):
+def classify(prog, res, **kw):
     sigs = res["results"][0]["sigs"]
     return [dict(kind=s.split("|")[0], sig=s, detail="") for s in sigs], {"ref": "valid"}
 

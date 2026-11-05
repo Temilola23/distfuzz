@@ -10,6 +10,8 @@ import traceback
 from contextlib import suppress
 from multiprocessing.connection import wait as conn_wait
 
+from .desc import BACKENDS
+
 # written to each rank's log before every program, so a crash is read from its own program's output only
 MARK = "@@ distfuzz program"
 # per-collective. Measured cross-rank arrival skew is <= 0.12 s (FINDINGS.md); a call that raises on some ranks
@@ -17,6 +19,18 @@ MARK = "@@ distfuzz program"
 TIMEOUT = 0.5
 # a new finding that involved a timeout must reproduce at this one before it is reported (Fuzzer.confirm)
 CONFIRM_TIMEOUT = 4.0
+# NCCL sets up a communicator per new group (and per p2p pair on first use) and a cold kernel launch is slow; 0.5 s
+# would time out healthy collectives. Not measured on T4 yet: the notebook's calibration cell checks it.
+NCCL_TIMEOUT = 3.0
+NCCL_CONFIRM_TIMEOUT = 15.0
+# set before torch is imported in a rank (desc.NCCL_SEMANTICS, "async errors")
+NCCL_ENV = {
+    "TORCH_NCCL_BLOCKING_WAIT": "1",
+    "TORCH_NCCL_ASYNC_ERROR_HANDLING": "1",
+    "TORCH_NCCL_DUMP_ON_TIMEOUT": "0",
+    "TORCH_NCCL_ENABLE_MONITORING": "1",
+    "TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC": "60",
+}
 
 
 def _free_port():
@@ -36,6 +50,10 @@ def _rank_main(rank, world, port, conn, cfg):
     )
     if cfg.get("detail"):
         os.environ["TORCH_DISTRIBUTED_DEBUG"] = "DETAIL"
+    backend, device = cfg.get("backend", "gloo"), cfg.get("device", "cpu")
+    if backend == "nccl":
+        for k, v in NCCL_ENV.items():
+            os.environ.setdefault(k, v)
     import warnings
 
     warnings.filterwarnings("ignore")
@@ -49,7 +67,14 @@ def _rank_main(rank, world, port, conn, cfg):
     from . import interp
 
     timeout = cfg["timeout"]
-    dist.init_process_group("gloo", rank=rank, world_size=world, timeout=timedelta(seconds=max(timeout, 10)))
+    dev = None
+    if device == "cuda":
+        dev = torch.device("cuda", rank % torch.cuda.device_count())
+        torch.cuda.set_device(dev)
+    # device_id makes NCCL init eagerly, so new_group can split the world communicator instead of creating one
+    dist.init_process_group(
+        backend, rank=rank, world_size=world, timeout=timedelta(seconds=max(timeout, 10)), device_id=dev
+    )
     covs = []
     if "py" in cfg["signals"]:
         covs.append(interp.Coverage())
@@ -71,7 +96,7 @@ def _rank_main(rank, world, port, conn, cfg):
             # resync the group-name counter so a desynchronised new_group() in an earlier program can't leak
             c10d._world.group_count = 1_000_000 + nprog * 1000
             pg = dist.new_group(list(range(world)), timeout=timedelta(seconds=timeout))
-            status, env = interp.run_program(prog, rank, pg, timeout)
+            status, env = interp.run_program(prog, rank, pg, timeout, device)
             res.update(status)
             for g in env.created_groups + [pg]:
                 with suppress(Exception):
@@ -99,10 +124,38 @@ def signals(coverage):
     return set(coverage.split("+"))
 
 
+def check_backend(backend, device):
+    if BACKENDS.get(backend) != device:
+        raise ValueError(f"supported backend/device pairs are {BACKENDS}, got {backend}/{device}")
+
+
+# a CUDA error poisons the rank's context: every later program would fail the same way
+CUDA_STICKY = ("CUDA error", "device-side assert", "illegal memory access")
+
+
+def _errors(r):
+    r = r or {}
+    return f"{r.get('exc')} {r.get('wait_exc')} {r.get('executor_error')}"
+
+
 class Session:
-    def __init__(self, world=4, timeout=TIMEOUT, detail=False, coverage=True, logdir=None, hang_deadline=None):
+    def __init__(
+        self,
+        world=4,
+        timeout=TIMEOUT,
+        detail=False,
+        coverage=True,
+        logdir=None,
+        hang_deadline=None,
+        backend="gloo",
+        device="cpu",
+    ):
+        check_backend(backend, device)
         self.world = world
+        self.backend, self.device = backend, device
         self.cfg = dict(
+            backend=backend,
+            device=device,
             timeout=timeout,
             detail=detail,
             signals=signals(coverage),
@@ -253,13 +306,15 @@ class Session:
         if kind == "crash":
             out["crash_log"] = self._log_tails([r for r in range(self.world) if (results[r] or {}).get("died")])
             out["exitcodes"] = [p.exitcode for p in self.procs]
-        if kind != "ok":
+        if kind == "ok" and self.device == "cuda" and any(s in _errors(r) for r in results for s in CUDA_STICKY):
+            out["cuda_sticky"] = True
+        if kind != "ok" or out.get("cuda_sticky"):
             self.restart()
         return out
 
 
-def run_once(prog, world=4, timeout=TIMEOUT, detail=False, coverage=False, logdir=None):
-    s = Session(world, timeout, detail, coverage, logdir)
+def run_once(prog, world=4, timeout=TIMEOUT, detail=False, coverage=False, logdir=None, backend="gloo", device="cpu"):
+    s = Session(world, timeout, detail, coverage, logdir, backend=backend, device=device)
     s.start()
     try:
         return s.run(prog)

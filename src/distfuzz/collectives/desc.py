@@ -159,3 +159,30 @@ FAULT_WEIGHTS = {
     "crash_rank": 3,
     "short_timeout_probe": 4,
 }
+
+BACKENDS = {"gloo": "cpu", "nccl": "cuda"}
+# Not generated with --backend nccl. Each would raise on every call and turn into a VALID_ERROR that says nothing
+# about NCCL, because the reference model follows Gloo.
+NCCL_EXCLUDED = {
+    "monitored_barrier": "Gloo only: ProcessGroupNCCL has no monitored barrier and raises",
+    "all_gather_coalesced": "ProcessGroupNCCL::allgather_coalesced raises NotImplementedError",
+}
+NCCL_EXCLUDED_REDOPS = {
+    "BAND": "NCCL has no bitwise reductions; ProcessGroupNCCL raises for ReduceOp.BAND",
+    "BOR": "NCCL has no bitwise reductions; ProcessGroupNCCL raises for ReduceOp.BOR",
+    "BXOR": "NCCL has no bitwise reductions; ProcessGroupNCCL raises for ReduceOp.BXOR",
+}
+# Generated, but the oracle treats them differently on NCCL (oracle.classify, backend="nccl"):
+NCCL_SEMANTICS = {
+    "no cross-rank checks": "NCCL does not compare op, root, dtype, shape or p2p tag across ranks, so a mismatched "
+    "call can complete with garbage or block until the timeout. SILENT_ACCEPT and HANG on a program the reference "
+    "calls invalid are counted in stats as nccl_unchecked, not reported.",
+    "p2p tags": "ProcessGroupNCCL ignores tags; send/recv pairs match in issue order.",
+    "fault ops": "--fault is refused with nccl: abort, destroy and kill semantics differ and the reference has no "
+    "model of them.",
+    "async errors": "a collective that never completes does not raise by itself. The executor sets "
+    "TORCH_NCCL_BLOCKING_WAIT=1 so wait() raises after the per-group timeout, as Gloo does. It also sets "
+    "TORCH_NCCL_ASYNC_ERROR_HANDLING=1 as a fallback (PyTorch ignores it while blocking wait is on): if the watchdog "
+    "times out first it kills the rank, and a death whose log shows a watchdog timeout is classified as a hang. "
+    "The session kills and restarts ranks after 6 * timeout + 10 s in any case.",
+}

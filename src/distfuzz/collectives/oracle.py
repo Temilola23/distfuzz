@@ -83,11 +83,32 @@ def close(a, b):
 
 def is_timeout(msg):
     m = msg.lower()
-    return "timed out" in m or "timeout" in m
+    return "timed out" in m or "timeout" in m or "timing out" in m
 
 
-def classify(prog, res, ref=None):
+NCCL_WATCHDOG = re.compile(r"(?i)watchdog caught collective operation timeout|timeout at nccl work")
+
+
+def effective_kind(res, backend="gloo"):
+    """A rank killed by the NCCL watchdog after a collective timeout is a hang, not a crash."""
+    if backend == "nccl" and res["kind"] == "crash" and NCCL_WATCHDOG.search(res.get("crash_log", "")):
+        return "hang"
+    return res["kind"]
+
+
+def classify(prog, res, ref=None, backend="gloo"):
+    """Findings for one run. Signatures from a backend other than gloo start with "<backend>:"."""
     ref = ref or run_reference(prog)
+    findings, info = _classify(prog, res, ref, backend)
+    if backend != "gloo":
+        findings = [dict(f, sig=f"{backend}:{f['sig']}") for f in findings]
+    return findings, info
+
+
+def _classify(prog, res, ref, backend):
+    kind = effective_kind(res, backend)
+    if kind != res["kind"]:
+        res = dict(res, kind=kind, nccl_watchdog=True)
     info = {
         "ref": ref.status,
         "ref_at": ref.at,
@@ -98,6 +119,7 @@ def classify(prog, res, ref=None):
         "detail_mismatch": 0,
         "checked": False,
         "oom": False,
+        "nccl_unchecked": 0,
     }
     victims = {c["args"]["victim"] for c in prog["calls"] if c["op"] == "crash_rank"}
     if res["kind"] == "crash" and victims:
@@ -123,6 +145,9 @@ def classify(prog, res, ref=None):
         codes = sorted({MEMCORRUPT.get(e, f"exit {e}") for e in res.get("exitcodes") or [] if e})
         head = norm(m.group(1)) if m else "+".join(codes) or "no exit code"
         return [dict(kind="CRASH", sig=f"CRASH|{ref.status}|{head}", detail=log[-1500:])], info
+    if res["kind"] == "hang" and backend == "nccl" and ref.status == "invalid" and not victims:
+        info["nccl_unchecked"] = 1  # NCCL does not detect the mismatch; blocking until the timeout is documented
+        return [], info
     if res["kind"] == "hang":
         detail = f"stuck ranks {res.get('stuck_ranks')}"
         if victims:
@@ -143,7 +168,9 @@ def classify(prog, res, ref=None):
     wexcs = [e for r in rs for e in r.get("wait_exc", [])]
     allmsgs = [e["msg"] for e in excs if e] + [e["msg"] for e in wexcs]
     info["exc"] = len(allmsgs)
-    info["timeouts"] = sum("timed out" in m.lower() for m in allmsgs)
+    # NCCL words it "... before timing out" or "timed out in blocking wait", depending on who noticed
+    timed_out = is_timeout if backend == "nccl" else (lambda m: "timed out" in m.lower())
+    info["timeouts"] = sum(timed_out(m) for m in allmsgs)
     info["detail_mismatch"] = sum("mismatch" in m.lower() and "collective" in m.lower() for m in allmsgs)
     if any(r.get("guard_bad") for r in rs):
         layouts = sorted(
@@ -187,6 +214,8 @@ def classify(prog, res, ref=None):
             findings.append(
                 dict(kind="WRONG_RESULT", sig=f"WRONG_RESULT|{opname}|{dt}", detail=f"mismatch on {bad[:6]}")
             )
+    elif ref.status == "invalid" and info["exc"] == 0 and backend == "nccl":
+        info["nccl_unchecked"] = 1  # every "invalid" in the reference is a cross-rank mismatch NCCL does not check
     elif ref.status == "invalid" and info["exc"] == 0:
         findings.append(
             dict(
@@ -196,3 +225,78 @@ def classify(prog, res, ref=None):
             )
         )
     return findings, info
+
+
+def outcome(res, backend="gloo"):
+    """Coarse outcome class of one run, for comparing backends: ok, raise, timeout, hang or crash."""
+    kind = effective_kind(res, backend)
+    if kind != "ok":
+        return kind, None
+    excs = [r["exc"] for r in res["results"] if r and r.get("exc")]
+    if excs:
+        e = min(excs, key=lambda e: e["idx"])
+        return ("timeout" if all(is_timeout(x["msg"]) for x in excs) else "raise"), e
+    wexcs = [e for r in res["results"] if r for e in r.get("wait_exc", [])]
+    if wexcs:
+        return ("timeout" if all(is_timeout(x["msg"]) for x in wexcs) else "raise"), dict(op="wait", **wexcs[0])
+    return "ok", None
+
+
+def _same_entry(x, y, exp):
+    if isinstance(exp, Val):
+        return isinstance(x, torch.Tensor) and isinstance(y, torch.Tensor) and x.dtype == y.dtype and x.shape == y.shape
+    if isinstance(exp, torch.Tensor):
+        return close(x, y)
+    return x == y
+
+
+def cross_compare(prog, ref, runs):
+    """Compare two runs of one program on different backends: [(backend, res), (backend, res)].
+
+    Only programs the reference calls valid and race-free are compared: for anything else the backends may legally
+    differ (NCCL_SEMANTICS). Values are compared where the reference specifies them, against each other, with the
+    single-run tolerances (integers exact).
+    """
+    if ref.status != "valid" or ref.racy:
+        return []
+    (na, ra), (nb, rb) = runs
+    (ca, ea), (cb, eb) = outcome(ra, na), outcome(rb, nb)
+    if {"crash", "hang"} & {ca, cb}:
+        # each backend's own oracle reports these, and Gloo's crashes are not deterministic (gloo vs gloo differs)
+        return []
+    if ca != cb:
+        e = ea or eb or {}
+        op = e.get("op", "?")
+        return [
+            dict(
+                kind="XBACKEND_OUTCOME",
+                sig=f"XBACKEND_OUTCOME|{op}|{na}={ca}|{nb}={cb}",
+                detail=f"{na}: {ca} {ea}\n{nb}: {cb} {eb}",
+            )
+        ]
+    if ca != "ok":
+        return []
+    bad = []
+    for r, (xa, xb) in enumerate(zip(ra["results"], rb["results"])):
+        for var, val in ref.t[r].items():
+            if val.v is not None and var in xa["outputs"] and var in xb["outputs"]:
+                if not close(xa["outputs"][var], xb["outputs"][var]):
+                    bad.append((r, var))
+        for var, lst in ref.lists[r].items():
+            ga, gb = xa["lists"].get(var), xb["lists"].get(var)
+            if ga is None or gb is None:
+                continue
+            if len(ga) != len(gb) or not all(_same_entry(x, y, e) for x, y, e in zip(ga, gb, lst)):
+                bad.append((r, var))
+    if not bad:
+        return []
+    at, r, var = min((ref.origin(r, var), r, var) for r, var in bad)
+    exp = ref.t[r].get(var)
+    dt = str(exp.v.dtype) if exp is not None and exp.v is not None else "list"
+    return [
+        dict(
+            kind="XBACKEND_VALUE",
+            sig=f"XBACKEND_VALUE|{prog['calls'][at]['op']}|{dt}|{na}!={nb}",
+            detail=f"{na} and {nb} disagree on {bad[:6]}",
+        )
+    ]

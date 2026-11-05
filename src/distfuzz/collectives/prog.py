@@ -4,7 +4,7 @@ import copy
 import json
 import random
 
-from .desc import CALLS, FAULT_OPS, FAULT_WEIGHTS, GENERATABLE
+from .desc import CALLS, FAULT_OPS, FAULT_WEIGHTS, GENERATABLE, NCCL_EXCLUDED, NCCL_EXCLUDED_REDOPS
 from .tensors import LAYOUTS
 
 DTYPE_W = [
@@ -127,11 +127,19 @@ def _apply_state(st, c):
         st.works.remove(a["w"])
 
 
+REDOP_W = [("SUM", 40), ("PRODUCT", 8), ("MIN", 10), ("MAX", 10), ("BAND", 5), ("BOR", 5), ("BXOR", 5), ("AVG", 6)]
+
+
 class Generator:
-    def __init__(self, world, rng: random.Random, fault=False):
+    def __init__(self, world, rng: random.Random, fault=False, backend="gloo"):
         self.world = world
         self.rng = rng
         self.fault = fault
+        if backend == "nccl" and fault:
+            raise ValueError("fault ops are not supported with nccl (desc.NCCL_SEMANTICS)")
+        nccl = backend == "nccl"
+        self.ops = [n for n in GENERATABLE if not (nccl and n in NCCL_EXCLUDED)]
+        self.redops = [(o, w) for o, w in REDOP_W if not (nccl and o in NCCL_EXCLUDED_REDOPS)]
 
     def rand_spec(self, shape=None, dtype=None):
         r = self.rng
@@ -158,19 +166,7 @@ class Generator:
         if typ == "bool_rare":
             return r.random() < 0.08
         if typ == "redop":
-            return wchoice(
-                r,
-                [
-                    ("SUM", 40),
-                    ("PRODUCT", 8),
-                    ("MIN", 10),
-                    ("MAX", 10),
-                    ("BAND", 5),
-                    ("BOR", 5),
-                    ("BXOR", 5),
-                    ("AVG", 6),
-                ],
-            )
+            return wchoice(r, self.redops)
         if typ == "root_mode":
             return wchoice(r, [("global", 70), ("group", 30)])
         if typ == "n_delta":
@@ -231,7 +227,7 @@ class Generator:
     def gen_call(self, st: State, op=None):
         r = self.rng
         if op is None:
-            pool = [(n, CALLS[n]["weight"]) for n in GENERATABLE]
+            pool = [(n, CALLS[n]["weight"]) for n in self.ops]
             if self.fault:
                 pool += [(n, FAULT_WEIGHTS[n]) for n in FAULT_OPS]
             op = wchoice(r, pool)
@@ -390,10 +386,10 @@ def sanitize(p):
 
 
 class Mutator:
-    def __init__(self, world, rng: random.Random, max_calls=24, diverge_weight=6, fault=False):
+    def __init__(self, world, rng: random.Random, max_calls=24, diverge_weight=6, fault=False, backend="gloo"):
         self.world = world
         self.rng = rng
-        self.gen = Generator(world, rng, fault=fault)
+        self.gen = Generator(world, rng, fault=fault, backend=backend)
         self.max_calls = max_calls
         self.diverge_weight = diverge_weight
 
