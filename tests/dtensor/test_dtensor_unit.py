@@ -328,9 +328,11 @@ def test_minimize_target_step_not_pinned():
     assert len(mp["steps"]) == 2
 
 
-def test_opname_torch_special():
+def test_opname_torch_special_and_bit_operators():
     assert opname("torch.special.bessel_j0(v1)") == "bessel_j0"
     assert opname("torch.special.bessel_j1(v1)") == "bessel_j1"
+    assert opname("v1 ^ 3") == "^"
+    assert opname("v1 << 1") == "<<"
 
 
 def test_zero_shape_has_zero_numel_and_reaches_trailing_and_repeated_zeros():

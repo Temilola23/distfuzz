@@ -42,7 +42,7 @@ def opname(expr):
         return m.group(2)
     if re.match(r"^v\d+\[", e):
         return "getitem"
-    m = re.search(r"\s([-+*/@%<>=&|]{1,2})\s", e)
+    m = re.search(r"\s([-+*/@%<>=&|^]{1,2})\s", e)
     if m:
         return m.group(1)
     if e.startswith("-"):
