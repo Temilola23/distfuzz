@@ -214,7 +214,10 @@ def hang_finding(reports):
         where = "cpu|" + loc
         lead = next(r for _, r in cpu if _loc(r) == loc)
     elif coll:
-        name = Counter(r["coll"] for _, r in coll).most_common(1)[0][0]
+        # the harness's flag exchange is where ranks go after a step raised or finished; the step's own collective,
+        # if any rank is in one, is the one the others are missing from
+        own = [r["coll"] for _, r in coll if not r["coll"].endswith("@harness")]
+        name = Counter(own or [r["coll"] for _, r in coll]).most_common(1)[0][0]
         inside = {i for i, r in coll if r["coll"] == name}
         missing = [i for i in range(len(reports)) if i not in inside]
         where = f"collective|{name}|ranks-missing:{missing}"

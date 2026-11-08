@@ -165,3 +165,15 @@ def test_deadlocked_rank_divergent_error_keeps_its_error_signature():
     assert f["kind"] == "RANK_DIVERGENT_ERROR" and f["msg"] == err
     assert f["hang"] == "collective|wait_tensor|ranks-missing:[2, 3]"
     assert signature(f) == signature(dict(kind="RANK_DIVERGENT_ERROR", step=1, expr="v1.view((0, 3))", msg=err))
+
+
+def test_step_collective_is_the_reference_even_when_most_ranks_are_in_the_harness():
+    # argmin over a dim sharded 1/0/0/0: ranks 1-3 raise on their empty shards, rank 0 waits in the op's collective
+    err = "IndexError: min(): Expected reduction dim N to have non-zero size."
+    reps = [_rep("collective", file="_functional_collectives.py", func="wait_tensor", coll="wait_tensor")]
+    reps += [dict(_rep("collective", func="all_gather", coll="all_gather@harness"), err=err)] * 3
+    f = hang_finding(reps)
+    assert f["kind"] == "RANK_DIVERGENT_ERROR" and f["msg"] == err
+    assert f["hang"] == "collective|wait_tensor|ranks-missing:[1, 2, 3]"
+    reps[1:] = [_rep("collective", func="all_gather", coll="all_gather@harness")] * 3
+    assert signature(hang_finding(reps)) == "HANG|collective|wait_tensor|ranks-missing:[1, 2, 3]"
