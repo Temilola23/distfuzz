@@ -35,13 +35,16 @@ class TrainGen(Gen):
     def moe(self):
         r = self.r
         E = r.choice(SIZES["E"])
+        topk = r.choice([1, 1, 2]) if E > 1 else 1
         return dict(
             t="moe",
             E=E,
-            topk=r.choice([1, 1, 2]) if E > 1 else 1,
+            topk=topk,
             eh=r.choice(SIZES["eh"]),
             score=r.choice(["softmax", "sigmoid"]),
-            route_norm=r.random() < 0.5,
+            # with top-1 routing, route_norm makes every routing weight 1: the router gets an analytically zero
+            # gradient, and Adam turns its rounding noise into lr-sized steps (a reference false positive)
+            route_norm=topk > 1 and r.random() < 0.5,
             shared=r.random() < 0.3,
         )
 
@@ -264,7 +267,7 @@ class TrainGen(Gen):
             return False
         has_moe = any(b["t"] == "moe" for b in m["blocks"])
         has_lora = any(b["t"] == "lora" for b in m["blocks"])
-        if any(b["t"] == "moe" and b["topk"] > b["E"] for b in m["blocks"]):
+        if any(b["t"] == "moe" and (b["topk"] > b["E"] or (b["topk"] == 1 and b["route_norm"])) for b in m["blocks"]):
             return False
         for s in scn["segs"]:
             par = s["par"]

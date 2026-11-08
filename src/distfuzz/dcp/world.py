@@ -58,7 +58,14 @@ class World:
         self.procs = []
         self.restarts = 0
         os.makedirs(logdir, exist_ok=True)
-        self.start()
+        for k in range(3):  # free_port can race with another world's TCPStore (EADDRINUSE)
+            try:
+                self.start()
+                return
+            except RuntimeError:
+                if k == 2:
+                    raise
+                time.sleep(2)
 
     def start(self):
         port = free_port()

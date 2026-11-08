@@ -19,6 +19,7 @@ Each fuzzer is differential. It runs the same program twice, once through the di
 | `distfuzz.dtensor` | DTensor ops (about 150 templates, Shard/Replicate/Partial on 1-D and 2-D meshes, autograd, `torch.compile`) | `full_tensor()` must equal the same program on plain tensors; also shapes, local shard shapes, gradients, and whether all ranks raise the same error. A per-rank watchdog names each hang by where the ranks are stuck: a DTensor loop and its branch (`HANG\|cpu\|_view_ops.py:view_groups:src_exhausted`), or a collective and the ranks missing from it. |
 | `distfuzz.compile` | `torch.compile` (aot_eager, inductor) over the DTensor programs above, and over small FSDP2 / TP / FSDP2+TP models trained for a few steps | Each program runs four ways: plain tensors, eager DTensor, compiled plain tensors and compiled DTensor. A finding is a difference the compiled DTensor run adds over eager DTensor that the compiled plain-tensor run does not show: wrong values or gradients, wrong output dtype, placement or local shape, a compile error on a program eager runs, an error on some ranks only, a hang, recompiles on identical inputs. See [Compile-path fuzzing](#compile-path-fuzzing). |
 | `distfuzz.dcp` | `torch.distributed.checkpoint` save/load and `get_state_dict`/`set_state_dict` across FSDP2, TP, HSDP, DDP and 2-D meshes | Checkpoints are reloaded into a poisoned model under a different world size and parallelism; loaded state must match saved state bitwise, and training must match an unsharded reference. |
+| `distfuzz.dcp --profile train` | Whole training steps as production stacks run them: forward, backward, gradient clipping with every `norm_type`, optimizer step, accumulation, checkpoint and resume on a different layout, LoRA, MoE with expert parallelism | The same single-process reference per step (loss, gradient norm, parameters, optimizer state), plus hang location per rank, errors on some ranks only, rank divergence and checkpoint round trips. See [Training profile](#training-profile). |
 | `distfuzz.repro` | Any finding or repro script | syzbot-style bundle: reliability over N fresh containers, bisection across 11 releases (2.4.1 to 2.14.0) and a pinned nightly, pinned Dockerfile, report, dashboard. |
 
 ## Key terms
@@ -155,6 +156,7 @@ python -m distfuzz.collectives minimize runs/collectives/findings/<id>.json
 python -m distfuzz.collectives fuzz --fault --minutes 5 --out runs/faults
 python -m distfuzz.dtensor fuzz --mode guided --world 4 --minutes 5 --out runs/dtensor
 python -m distfuzz.dcp fuzz --mode guided --minutes 5 --out runs/dcp
+DCP_PG_TIMEOUT=600 python -m distfuzz.dcp fuzz --profile train --minutes 5 --timeout 30 --out runs/train
 
 torchrun --nproc-per-node 4 examples/repros/collectives/gloo_strided_sweep.py
 ```
@@ -166,6 +168,24 @@ python -m distfuzz.repro images --only 2.14.0
 python -m distfuzz.repro bundle examples/repros/dtensor/cases.py::setitem_shard --name setitem --n 5 --no-bisect
 python -m distfuzz.repro specs examples/repro_specs.json --jobs 2   # rebuild every bundle: 20-run reliability, release bisection
 ```
+
+### Training profile
+
+`python -m distfuzz.dcp fuzz --profile train` generates training runs instead of checkpoint chains. It uses the DCP fuzzer's scenario format, worker ranks, reference and checkpoint oracles, and adds the parts of a training step that production stacks exercise and the classic profile does not.
+
+Each scenario starts from a template in `src/distfuzz/dcp/templates.py`. A template fixes what one stack does (torchtitan dense and MoE, the Hugging Face TP plan, torchtune LoRA, accelerate with FSDP2 or DDP, Lightning's ModelParallelStrategy) and records where each choice comes from as `repo@commit:path:line`. The generator then draws sizes that are small or uneven relative to the world size (2 to 4 Gloo ranks), so FSDP2 leaves some ranks empty dim-0 shards and MoE routers send zero tokens to some experts.
+
+| Axis | Values |
+|---|---|
+| Model | llama-style blocks (RMSNorm, attention, GELU MLP), MLP stacks, LoRA MLPs with a frozen base (torchtune `LoRALinear`), MoE with a top-k router and grouped experts (torchtitan), embedding plus head, tied or not |
+| Parallelism | FSDP2 per block with `reshard_after_forward` and mixed precision, TP (`ColwiseParallel`/`RowwiseParallel`, NoParallel for the rest, a loss-parallel head), FSDP2 + TP on a 2-D mesh, HSDP, DDP, expert parallelism (`all_to_all_single` with uneven splits, functional or plain c10d) |
+| Step | gradient accumulation with or without `no_sync` / `set_requires_gradient_sync`, activation checkpointing (full or selective), SGD/Adam/AdamW with foreach or fused |
+| Clipping | `norm_type` 2, 1, 3 and inf, `foreach` on, off or default, through `torch.nn.utils.clip_grad_norm_`, torchtitan's per-mesh clip or accelerate's DTensor-aware clip |
+| Checkpoint | `dcp.save`/`async_save` and `dcp.load` of sharded state dicts, full state dicts with `cpu_offload`, `set_state_dict` with `broadcast_from_rank0` (joint call, the split API torchtune and accelerate use, or model only), resumed under another world size or parallelism |
+
+Signatures name the configuration axes that matter for the phase that failed, for example `TRAIN|PARTIAL_ERR|train:clip|fsdp2|clip:inf|clip-impl:torch|empty-shard|RuntimeError: _foreach_norm cannot compute the infinity norm on an empty tensor`. `PARTIAL_ERR` means some ranks raised and the others were stuck in a collective; `HANG` findings carry each rank's last phase and its stack location (`state_dict.py:set_state_dict > distributed_c10d.py:broadcast`), read from a faulthandler dump. `python -m distfuzz.dcp minimize` replays training scenarios on persistent worlds and shrinks them (fewer segments, steps and blocks, smaller layers, fewer axes) while the finding's kind, phase and message stay the same.
+
+Set `DCP_PG_TIMEOUT` above `--timeout` so a stuck collective is reported by the harness with stack locations rather than as a Gloo timeout. The tests in `tests/dcp/test_train_multirank.py` check that the profile rediscovers the inf-norm clipping crash on FSDP2 and the `set_state_dict(broadcast_from_rank0)` hang, and that expert parallelism matches the single-process MoE.
 
 **C++ coverage.** `docker/Dockerfile.cov` builds PyTorch v2.14.0 from source with clang and SanitizerCoverage in Gloo and c10d only (128,324 edges; about 20 GB of memory and 1-2 hours to build). `--signal cxx` reads the counters in every rank. In guided mode a program with new C++ features is re-run twice; features a re-run does not reproduce are dropped and ignored from then on, and the program is shrunk to the calls the new features need before it enters the corpus.
 
