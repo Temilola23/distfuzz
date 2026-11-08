@@ -139,10 +139,9 @@ class CompileGen:
     def finish(self, prog):
         prog.setdefault("cfg", rand_cfg(self.rng, self.backends))
         prog["track"] = "op"
-        if prog["cfg"]["dynamic"] != "static":
-            prog["cfg"]["variant"] = variant_inputs(prog, self.rng, self.world)
-        else:
-            prog["cfg"]["variant"] = None
+        # every config gets a variant call: with dynamic=False the guards must notice the new size and recompile
+        # (VERIFIED.md section 52: a DTensor whose local shard keeps its shape is not recompiled)
+        prog["cfg"]["variant"] = variant_inputs(prog, self.rng, self.world)
         return prog
 
     def generate(self):

@@ -52,3 +52,19 @@ def test_known_compiled_embedding_error_is_reported(tmp_path):
     status, sigs, _ = _run(tmp_path, prog)
     assert status == "ok"
     assert any(s.startswith("COMPILE|aot_eager|static|ERR|") for s in sigs), sigs
+
+
+def test_variant_leg_reports_stale_global_shape(tmp_path):
+    # VERIFIED.md section 52: 7 -> 8 rows keeps the (2, 3) local shard on ranks 0-2, which reuse the first graph
+    x7 = dict(shape=[7, 3], dtype="f32", seed=1, rg=False, pl=["S0"])
+    x8 = dict(x7, shape=[8, 3])
+    prog = dict(
+        track="op",
+        mesh="1d",
+        cfg=dict(CFG, variant=dict(old=7, new=8, inputs=[x8])),
+        inputs=[x7],
+        steps=[dict(out="v0", expr="mk(0)"), dict(out="v1", expr="v0 * 2")],
+    )
+    status, sigs, _ = _run(tmp_path, prog)
+    assert status == "ok"
+    assert "COMPILE|aot_eager|static|VARIANT_MISMATCH|*|shape" in sigs, sigs
