@@ -99,12 +99,15 @@ def main(argv=None):
     ap.add_argument("--module-rate", type=float, default=0.25, help="share of FSDP2/TP module programs")
     ap.add_argument("--mutate-rate", type=float, default=0.3, help="share of programs mutated from compiled ones")
     ap.add_argument("--confirm-hangs", type=int, default=1, help="re-run the first program of each hang signature")
+    ap.add_argument("--shared-cache", action="store_true", help="ranks share one inductor cache dir (as torchrun does)")
     ap.add_argument("--save-all", action="store_true", help="write every program in full to programs.jsonl (replay)")
     a = ap.parse_args(argv)
     os.makedirs(a.out, exist_ok=True)
     rng = random.Random(a.seed)
     gen = CompileGen(a.world, rng, tuple(a.backends.split(",")), a.module_rate)
-    world = World(a.world, os.path.join(a.out, "logs"), pg_timeout=min(120, a.timeout * 0.5))
+    world = World(
+        a.world, os.path.join(a.out, "logs"), pg_timeout=min(120, a.timeout * 0.5), shared_cache=a.shared_cache
+    )
     sigs: Counter = Counter()
     kinds: Counter = Counter()
     skips: Counter = Counter()
