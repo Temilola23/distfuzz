@@ -186,7 +186,9 @@ def test_nn_ops_cover_every_family_and_evaluate():
 def test_no_ops_that_depend_on_the_sign_of_zero():
     # sum over ranks turns -0.0 into +0.0, so these would report false mismatches on Partial(sum) inputs. The tail
     # group's forms are safe: copysign takes its sign from |x| + 0.5 and signbit never sees a zero
-    safe = re.compile(r"copysign_?\((?:v\d+, )?v\d+\.abs\(\) \+ 0\.5\)|torch\.signbit\(torch\.where\((v\d+) == 0, 1\.0, \1\)\)")
+    safe = re.compile(
+        r"copysign_?\((?:v\d+, )?v\d+\.abs\(\) \+ 0\.5\)|torch\.signbit\(torch\.where\((v\d+) == 0, 1\.0, \1\)\)"
+    )
     gen = Gen(4, random.Random(5))
     for _ in range(60):
         p = gen.generate()
@@ -438,7 +440,8 @@ def test_tail_ops_evaluate_on_plain_tensors():
     gen = Gen(4, random.Random(6))
     ok = tried = 0
     names = set()
-    for shape, dt in [([3, 4], "f32"), ([2, 3, 4], "f64"), ([1, 2, 4, 4], "f32"), ([2, 2, 2, 2, 2], "f32"), ([5], "i64")]:
+    cases = [([3, 4], "f32"), ([2, 3, 4], "f64"), ([1, 2, 4, 4], "f32"), ([2, 2, 2, 2, 2], "f32"), ([5], "i64")]
+    for shape, dt in cases:
         for _ in range(80):
             prog = dict(mesh="1d", inputs=[], steps=[], nv=0)
             for _ in range(2):
