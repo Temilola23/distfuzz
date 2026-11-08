@@ -59,6 +59,9 @@ def test_mut_re_matches_inplace_only():
     assert MUT_RE.search("v1.mul_(2)")
     assert MUT_RE.search("SETITEM(v1, 0, 5)")
     assert MUT_RE.search("BW(v3)")
+    # DTensor refuses F.x(..., inplace=True) on a Partial input while the reference mutates; unless the step counts
+    # as a mutation the worker carries on with diverged values and reports later steps (var_mean, einsum, ...)
+    assert MUT_RE.search("F.hardtanh(v1, inplace=True)")
     for e in (
         "torch.nan_to_num(v1.log())",
         "F.one_hot(v1, 3)",

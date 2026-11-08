@@ -12,7 +12,7 @@ warnings.filterwarnings("ignore")
 MAX_NUMEL = 4096
 MESH_SHAPES = {4: {"1d": (4,), "2d": (2, 2)}, 3: {"1d": (3,)}, 2: {"1d": (2,)}, 6: {"1d": (6,), "2d": (2, 3)}}
 NAME_RE = re.compile(r"\bv\d+\b")
-MUT_RE = re.compile(r"_\(|SETITEM|BW\(")
+MUT_RE = re.compile(r"_\(|SETITEM|BW\(|inplace=True")
 MESH_NDIM = {"1d": 1, "2d": 2}
 FOREACH_UNARY = (
     "abs acos asin atan ceil cos cosh erf erfc exp expm1 floor frac lgamma log log10 log1p log2 neg reciprocal round "
@@ -405,7 +405,7 @@ class Gen:
             "torch.fmax({a}.float(), {b}.float())",
             "torch.hypot({a}.float(), {b}.float())",
             "torch.logaddexp({a}.float(), {b}.float())",
-            "torch.xlogy({a}.float().abs(), {b}.float().abs())",
+            "torch.xlogy({a}.float().abs(), {b}.float().abs() + 1)",
             "torch.heaviside({a}.float(), {b}.float())",
             "{a} != {b}",
             "{a} >= {b}",
@@ -424,6 +424,10 @@ class Gen:
             "torch.ldexp({a}.float(), {b}.abs().clamp(max=4).int())",
             "torch.remainder({a}, {b}.abs() + 1)",
         ]
+        if torch.bfloat16 in (t.dtype, env[y].dtype) or torch.float16 in (t.dtype, env[y].dtype):
+            # a half value that matched at half tolerance is compared at float32 tolerance after .float(), and the
+            # log terms amplify the difference
+            ops = [o for o in ops if "xlog" not in o]
         a, b = (x, y) if r.random() < 0.8 else (y, x)
         return r.choice(ops).format(a=a, b=b)
 
