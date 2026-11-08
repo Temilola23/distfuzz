@@ -223,6 +223,10 @@ def hang_finding(reports):
         where = f"collective|{name}|ranks-missing:{missing}"
         lead = next(r for _, r in coll if r["coll"] == name)
         errs = [reports[i]["err"] for i in missing if reports[i] and reports[i].get("err")]
+        if not errs and name.endswith("@harness"):
+            # no rank is in an op collective (ranks stuck in compiled code send no report), but the ranks in the
+            # flag exchange raised: the same rank-divergent error
+            errs = [reports[i]["err"] for i in sorted(inside) if reports[i].get("err")]
         if errs:
             # the missing ranks raised in this step and wait in the harness's error-flag exchange while the others
             # wait in the step's own collective: a rank-divergent error that deadlocks instead of being exchanged

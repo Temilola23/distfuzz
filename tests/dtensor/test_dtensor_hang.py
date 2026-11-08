@@ -177,3 +177,13 @@ def test_step_collective_is_the_reference_even_when_most_ranks_are_in_the_harnes
     assert f["hang"] == "collective|wait_tensor|ranks-missing:[1, 2, 3]"
     reps[1:] = [_rep("collective", func="all_gather", coll="all_gather@harness")] * 3
     assert signature(hang_finding(reps)) == "HANG|collective|wait_tensor|ranks-missing:[1, 2, 3]"
+
+
+def test_harness_only_deadlock_with_errors_is_rank_divergent():
+    # compiled amax on a 1/0 shard: ranks 1 and 3 raise and wait in the flag exchange, ranks 0 and 2 block inside
+    # compiled code and send no report
+    err = "IndexError: amax(): Expected reduction dim N to have non-zero size."
+    rep = dict(_rep("collective", func="all_gather", coll="all_gather@harness"), err=err)
+    f = hang_finding([None, rep, None, rep])
+    assert f["kind"] == "RANK_DIVERGENT_ERROR" and f["msg"] == err
+    assert f["hang"] == "collective|all_gather@harness|ranks-missing:[0, 2]"

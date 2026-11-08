@@ -128,14 +128,18 @@ def check_value(tag, si, expr, rv, dv, findings, hashes):
             )
         try:
             exp_local, _ = compute_local_shape_and_global_offset(dv.shape, dv.device_mesh, dv.placements)
-            if tuple(exp_local) != tuple(dv.to_local().shape):
+            # no_grad: a multi-output view (chunk) of a base mutated in place cannot be used under grad mode, on
+            # plain tensors too; the reference never uses it, so only the observation would raise
+            with torch.no_grad():
+                local_shape = tuple(dv.to_local().shape)
+            if tuple(exp_local) != local_shape:
                 findings.append(
                     dict(
                         kind=tag + "LOCAL_SHAPE",
                         step=si,
                         expr=expr,
                         msg=f"placements={dv.placements} global={tuple(dv.shape)} "
-                        f"expected local={tuple(exp_local)} actual={tuple(dv.to_local().shape)}",
+                        f"expected local={tuple(exp_local)} actual={local_shape}",
                     )
                 )
         except Exception as e:
@@ -153,7 +157,8 @@ def check_value(tag, si, expr, rv, dv, findings, hashes):
         )
     full, err = None, None
     try:
-        full = dv.full_tensor() if is_dt else dv
+        with torch.no_grad():
+            full = dv.full_tensor() if is_dt else dv
     except Exception as e:
         err = e
         WD.err = norm_msg(e)
