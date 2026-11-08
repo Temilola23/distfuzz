@@ -89,6 +89,12 @@ def run(fn, distributed):
     return [full(v) for v in out], [full(g) if g is not None else None for g in grads], out
 
 
+def same(a, b):
+    if not isinstance(a, torch.Tensor) or not isinstance(b, torch.Tensor):
+        return a is b
+    return a.shape == b.shape and a.dtype == b.dtype and torch.allclose(a.double(), b.double(), 1e-4, 1e-4, True)
+
+
 ref, ref_g, _ = run(prog_fn, False)
 eager, eager_g, eager_raw = run(prog_fn, True)
 compiled_fn = torch.compile(prog_fn, backend={backend!r}, fullgraph={fullgraph!r}, dynamic={dynamic!r})
@@ -99,11 +105,18 @@ except Exception as e:
     raise SystemExit(1)
 
 
-def same(a, b):
-    if not isinstance(a, torch.Tensor) or not isinstance(b, torch.Tensor):
-        return a is b
-    return a.shape == b.shape and a.dtype == b.dtype and torch.allclose(a.double(), b.double(), 1e-4, 1e-4, True)
-
+VARIANT = {variant}
+if VARIANT is not None:
+    # the same compiled function, called again on inputs where one size is changed (dynamic configs)
+    INPUTS = VARIANT
+    vref, _, _ = run(prog_fn, False)
+    try:
+        vcomp, _, _ = run(compiled_fn, True)
+        if rank == 0:
+            for name, r, c in zip(OUTS, vref, vcomp):
+                print(f"variant {{name}}: compiled==ref {{same(r, c)}}")
+    except Exception as e:
+        print(f"rank {{rank}}: compiled call on the variant inputs raised {{type(e).__name__}}: {{str(e).splitlines()[0][:300]}}")
 
 if rank == 0:
     for name, r, e, c, er, cr in zip(OUTS, ref, eager, comp, eager_raw, comp_raw):
@@ -173,13 +186,14 @@ def op_repro(prog, name="repro.py"):
         partial_pieces=inspect.getsource(RT.partial_pieces),
         parse_pl=inspect.getsource(RT.parse_pl),
         src=src,
-        inputs=json.dumps(prog["inputs"]),
+        inputs=repr(prog["inputs"]),
         args=[j for _, j in fargs],
         outs=outs,
         bws=bws,
         backend=cfg["backend"],
         fullgraph=cfg["fullgraph"],
         dynamic=dyn,
+        variant=repr(cfg["variant"]["inputs"]) if cfg.get("variant") else None,
     )
 
 

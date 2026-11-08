@@ -99,6 +99,7 @@ def main(argv=None):
     ap.add_argument("--module-rate", type=float, default=0.25, help="share of FSDP2/TP module programs")
     ap.add_argument("--mutate-rate", type=float, default=0.3, help="share of programs mutated from compiled ones")
     ap.add_argument("--confirm-hangs", type=int, default=1, help="re-run the first program of each hang signature")
+    ap.add_argument("--save-all", action="store_true", help="write every program in full to programs.jsonl (replay)")
     a = ap.parse_args(argv)
     os.makedirs(a.out, exist_ok=True)
     rng = random.Random(a.seed)
@@ -149,20 +150,11 @@ def main(argv=None):
             agg["variant_recompiled"] += int(info["variant_graphs"] > 0)
         if info.get("eager_mismatch"):
             agg["eager_mismatch_progs"] += 1
-        fprog.write(
-            json.dumps(
-                dict(
-                    id=pid,
-                    status=status,
-                    dt=round(dt, 2),
-                    info=info,
-                    track=prog.get("track"),
-                    cfg={k: v for k, v in prog.get("cfg", {}).items() if k != "variant"},
-                    n=len(findings),
-                )
-            )
-            + "\n"
-        )
+        rec = dict(id=pid, status=status, dt=round(dt, 2), info=info, track=prog.get("track"), n=len(findings))
+        rec["cfg"] = {k: v for k, v in prog.get("cfg", {}).items() if k != "variant"}
+        if a.save_all:
+            rec["prog"] = prog
+        fprog.write(json.dumps(rec) + "\n")
         if status == "ok" and not info.get("skip") and info.get("graphs"):
             pool.append(prog)
         for f in findings:
@@ -201,3 +193,28 @@ def main(argv=None):
 
 if __name__ == "__main__":
     main()
+
+
+def replay_main(argv=None):
+    """Run saved programs in order in one world (``fuzz --save-all`` output), to reproduce findings that depend on
+    what ran before them in the same rank processes."""
+    ap = argparse.ArgumentParser(prog="distfuzz.compile replay")
+    ap.add_argument("programs", help="programs.jsonl written with --save-all")
+    ap.add_argument("--from-id", type=int, default=0)
+    ap.add_argument("--upto", type=int, default=10**9)
+    ap.add_argument("--only", default="", help="comma list of program ids to run, in file order")
+    ap.add_argument("--world", type=int, default=4)
+    ap.add_argument("--timeout", type=float, default=240)
+    ap.add_argument("--logs", default="runs/replay_logs")
+    a = ap.parse_args(argv)
+    only = {int(x) for x in a.only.split(",") if x}
+    world = World(a.world, a.logs, pg_timeout=min(120, a.timeout * 0.5))
+    for line in open(a.programs):
+        rec = json.loads(line)
+        prog = rec.get("prog")
+        if prog is None or not (a.from_id <= rec["id"] <= a.upto) or (only and rec["id"] not in only):
+            continue
+        status, res = world.run(prog, a.timeout)
+        findings, _ = collect(status, res, world, prog)
+        print(json.dumps(dict(id=rec["id"], status=status, sigs=sorted({signature(f, prog) for f in findings}))))
+    world.close()

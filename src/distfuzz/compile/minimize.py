@@ -55,16 +55,27 @@ def minimize_op(prog, target, test):
         return p
 
     prog["steps"] = ddmin(prog["steps"], lambda st: well_formed(st) and test(with_steps(st)))
-    for spec in prog["inputs"]:
+    var = prog["cfg"].get("variant")
+    vspecs = var["inputs"] if var else [None] * len(prog["inputs"])
+    for spec, vspec in zip(prog["inputs"], vspecs):
+        # the variant's inputs differ only in one size: keep their placements and grad flags in step
         for d, old in enumerate(spec["pl"]):
             if old != "R":
                 spec["pl"][d] = "R"
+                if vspec:
+                    vspec["pl"][d] = "R"
                 if not test(prog):
                     spec["pl"][d] = old
+                    if vspec:
+                        vspec["pl"][d] = old
         if spec.get("rg"):
             spec["rg"] = False
+            if vspec:
+                vspec["rg"] = False
             if not test(prog):
                 spec["rg"] = True
+                if vspec:
+                    vspec["rg"] = True
     if prog["cfg"].get("ret") == "all":
         prog["cfg"]["ret"] = "leaves"
         if not test(prog):
