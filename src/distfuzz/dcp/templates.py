@@ -58,7 +58,7 @@ SRC = {
     "PipelineScheduleMulti gets all local stages, scale_grads=False with a loss already divided by the global "
     "count), 645-705 (_split_module keeps ModuleDict layers under their FQNs), 707-745 (stage ids per rank: 'loop', "
     "'v' for ZBVZeroBubble / DualPipeV), 890-925 (PipelineStage(model_chunk, stage_idx, num_stages, device, "
-    "group=pp group)); torchtitan/distributed/utils.py:695-704 (clip: all_reduce of norm**p, or max, over pp)",
+    "group=pp group)); torchtitan/distributed/utils.py:702-708 (clip: all_reduce of norm**p, or max, over pp)",
     "titan.ckpt2": "torchtitan@6062827 torchtitan/components/checkpointer/base.py:128-160 (ModelWrapper: union of "
     "Module.state_dict() over model parts, load_state_dict(strict=False)); torchtitan/components/optim/optimizer.py:"
     "491-510 and components/optim/utils.py:29-230 (OptimizersContainer: optimizers built from named parameters, "

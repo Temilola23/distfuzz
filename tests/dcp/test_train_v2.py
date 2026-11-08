@@ -21,7 +21,7 @@ def test_predictor_flags_known_configs():
     assert 0 < len(flagged) < len(scns) // 2
     for s in flagged:
         for k in known.predict(s):
-            assert k[0] in "KN"
+            assert k[0] in "KNL"
 
 
 def test_predictor_joint_bcast_and_inf_clip():

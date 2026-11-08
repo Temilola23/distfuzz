@@ -481,6 +481,10 @@ class TrainGen(Gen):
                     return False
                 if pc["sched"] != "GPipe" and pc["mb"] < pp * pc["vps"]:
                     return False
+                # selective AC caches each saved op once and refuses a second backward through the region
+                # (torch/utils/checkpoint.py _CachedTorchDispatchMode); split-backward schedules need two
+                if scn.get("ac") == "sac" and pc["sched"] in ("InterleavedZeroBubble", "ZBVZeroBubble", "DualPipeV"):
+                    return False
                 # torch rejects compiled stage modules under the split-backward (zero-bubble) schedules
                 if scn.get("compile") and pc["sched"] in ("InterleavedZeroBubble", "ZBVZeroBubble", "DualPipeV"):
                     return False
@@ -501,6 +505,12 @@ class TrainGen(Gen):
                 return False
             if s.get("mesh_from_group") and par != "fsdp":
                 return False
+            # the raw API saves Module.state_dict(), whose keys carry torch.compile's "_orig_mod." (and DDP's
+            # "module.") prefixes; only the DSD / torchtitan paths canonicalize them, so raw + compile is a user error
+            if scn.get("compile") and (sv.get("api") == "raw" or s.get("load", {}).get("api") == "raw"):
+                return False
+            if sv.get("api") == "raw" and (par == "ddp" or (nxt is not None and nxt["par"] == "ddp")):
+                return False  # DDP's state_dict keys carry "module."
             if s.get("groups") and par not in ("fsdp", "fsdp_tp", "hsdp", "pp_fsdp"):
                 return False
         return True

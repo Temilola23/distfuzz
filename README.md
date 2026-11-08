@@ -185,6 +185,18 @@ Each scenario starts from a template in `src/distfuzz/dcp/templates.py`. A templ
 
 Signatures name the configuration axes that matter for the phase that failed, for example `TRAIN|PARTIAL_ERR|train:clip|fsdp2|clip:inf|clip-impl:torch|empty-shard|RuntimeError: _foreach_norm cannot compute the infinity norm on an empty tensor`. `PARTIAL_ERR` means some ranks raised and the others were stuck in a collective; `HANG` findings carry each rank's last phase and its stack location (`state_dict.py:set_state_dict > distributed_c10d.py:broadcast`), read from a faulthandler dump. `python -m distfuzz.dcp minimize` replays training scenarios on persistent worlds and shrinks them (fewer segments, steps and blocks, smaller layers, fewer axes) while the finding's kind, phase and message stay the same.
 
+The second round of the profile added these axes. Each comes from a template with its provenance (`titan-sp`, `titan-pp`, `mcore-fsdp2`, `accel-fp8`, compile on the accelerate templates).
+
+| Axis | Values |
+|---|---|
+| Sequence parallelism | `SequenceParallel` norms, colwise inputs gathered from `Shard(1)`, rowwise outputs reduce-scattered to `Shard(1)`, a sequence-sharded embedding output and lm_head input, optionally with the loss-parallel head (torchtitan's default TP plan) |
+| Pipeline parallelism | `PipelineStage` model chunks that keep the model's FQNs, schedules GPipe, 1F1B, Interleaved1F1B, LoopedBFS, InterleavedZeroBubble, ZBVZeroBubble and DualPipeV, 2 to 4 stages or 2 x 2 PP x FSDP2, torchtitan's loss scaling and PP-aware clip; checkpoints through torchtitan's model and optimizer containers, so a run can resume between PP and non-PP layouts |
+| `torch.compile` | per block before FSDP (`torch.compile(block)`), in place after FSDP (`Module.compile()`, accelerate's regional compile), or the whole model; `aot_eager`, and `inductor` when a C++ compiler is present (the `distfuzz:cpu-cc` image); each rank gets its own inductor cache directory |
+| FSDP2 knobs | gradient divide factor 1 with the loss scaled by 1/dp, `set_unshard_in_backward(False)`, forward and backward prefetch chains, `fully_shard([last norm, head])`, deferred reduction across accumulation steps, `reshard_after_forward` as an int, `DeviceMesh.from_group`; 1 x 4 and 4 x 1 meshes |
+| float8 | torchao `convert_to_float8_training` as accelerate applies it, with float8 all-gather and scale precompute; only when torchao is installed |
+
+`--known-rate R` runs a scenario that `dcp/known.py` predicts will hit a known bug (from its configuration alone) with probability R, so campaign time goes to new ground while regressions still show; `stats.jsonl` counts skipped, useful and known-only scenarios. `--device cuda` runs the workers on NCCL with one GPU per rank and a CPU reference; no Gloo group is created in that mode.
+
 Set `DCP_PG_TIMEOUT` above `--timeout` so a stuck collective is reported by the harness with stack locations rather than as a Gloo timeout. The tests in `tests/dcp/test_train_multirank.py` check that the profile rediscovers the inf-norm clipping crash on FSDP2 and the `set_state_dict(broadcast_from_rank0)` hang, and that expert parallelism matches the single-process MoE.
 
 **C++ coverage.** `docker/Dockerfile.cov` builds PyTorch v2.14.0 from source with clang and SanitizerCoverage in Gloo and c10d only (128,324 edges; about 20 GB of memory and 1-2 hours to build). `--signal cxx` reads the counters in every rank. In guided mode a program with new C++ features is re-run twice; features a re-run does not reproduce are dropped and ignored from then on, and the program is shrunk to the calls the new features need before it enters the corpus.

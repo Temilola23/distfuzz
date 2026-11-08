@@ -71,9 +71,19 @@ def strided_full_load(scn, seg):
 ZB = ("InterleavedZeroBubble", "ZBVZeroBubble", "DualPipeV")
 
 
+def uneven_fsdp(scn, seg):
+    """Some FSDP-sharded parameter whose dim 0 does not divide by the shard degree (padded shards)."""
+    from distfuzz.dcp.runtime import build_model
+
+    deg = seg["w"] if seg["par"] == "fsdp" else seg.get("mesh2d", [1, seg["w"]])[1]
+    if deg <= 1:
+        return False
+    return any(p.dim() and p.shape[0] % deg for p in build_model(dict(scn, f8=None), 0).parameters())
+
+
 def zb_view_boundary(scn, seg):
-    """§34: a split-backward schedule where some stage that is not the last ends in a module whose output is a
-    view (nn.Embedding, or a bare nn.Linear on 3-D activations)."""
+    """#200199 (fixed after 2.14.0): a split-backward schedule where a stage that is not the last ends in a module
+    whose output is a view (nn.Embedding, or a bare nn.Linear on 3-D activations)."""
     from distfuzz.dcp.runtime import pp_split
 
     pc = seg.get("pp") or {}
@@ -115,10 +125,17 @@ def predict(scn):
             ids.append("K150336-uneven-tp")
         if ld.get("mode") in FULL_LOADS and strided_full_load(scn, seg):
             ids.append("K32-strided-full-load")
+        f8 = scn.get("f8") or {}
+        if f8.get("ag") and par in ("fsdp", "hsdp") and uneven_fsdp(scn, seg):
+            ids.append("Kao3982-float8-allgather-uneven")
         if par == "pp_fsdp" and seg["steps"] > 0 and (seg.get("pp") or {}).get("sched") in ZB:
             ids.append("N33-zb-fsdp-grads")
+        if seg.get("sp") and o["name"] == "sgd" and o.get("momentum") and seg.get("save"):
+            ids.append("N34-sp-partial-momentum")
+        if scn.get("compile") and par in ("tp", "fsdp_tp") and seg["steps"] > 0 and "emb" in seg.get("tp", {}):
+            ids.append("K201700-compile-async-tp-input")
         if par in ("pp", "pp_fsdp") and seg["steps"] > 0 and zb_view_boundary(scn, seg):
-            ids.append("N34-zb-view-output")
+            ids.append("K200199-zb-view-detach")
     return sorted(set(ids))
 
 
@@ -142,7 +159,16 @@ RULES = [
     (lambda s, f, c: "reduction dim" in s or "remove or reshape sharded" in s, "K150336-uneven-tp"),
     (lambda s, f, c: "in-place operations that require placement" in s, "K9-empty-tp-shard"),
     (lambda s, f, c: "index_select(): self indexing axis dim should be positive" in s, "K15-embedding-empty-row-shard"),
-    (lambda s, f, c: "Can't detach views in-place" in _tb(f) or "stage backward input" in s, "N34-zb-view-output"),
+    (lambda s, f, c: "Can't detach views in-place" in _tb(f) or "stage backward input" in s, "K200199-zb-view-detach"),
+    (lambda s, f, c: "unhashable type: non-nested SymInt" in _tb(f), "K159635-dtensor-dynamic-symint-hash"),
+    # FSDP2 all-gathers in the inputs' dtype when they all match; Gloo has no float8 types (backend limitation)
+    (lambda s, f, c: "Invalid scalar type" in s and (c.get("f8") or {}).get("ag"), "Lgloo-float8-allgather"),
+    (
+        lambda s, f, c: (
+            (f.get("kind") == "CRASH" or "Received data size doesn't match" in _tb(f)) and (c.get("f8") or {}).get("ag")
+        ),
+        "Kao3982-float8-allgather-uneven",
+    ),
     (
         lambda s, f, c: (
             f.get("kind") in ("LOSS_MISMATCH", "GNORM_MISMATCH", "STATE_MISMATCH")
@@ -151,6 +177,24 @@ RULES = [
         ),
         "N33-zb-fsdp-grads",
     ),
+    # #201700: the TP embedding's output (redistribute(async_op=True).to_local(), an AsyncCollectiveTensor that
+    # requires grad) enters a compiled block; AOT autograd resolves it with trigger_wait() and drops requires_grad,
+    # so the gradient never reaches the embedding (zero grad, or a plain Tensor in RedistributeBackward)
+    (
+        lambda s, f, c: (
+            c.get("compile")
+            and (
+                "has no attribute '_local_tensor'" in s
+                or (
+                    f.get("kind") in ("LOSS_MISMATCH", "GNORM_MISMATCH", "STATE_MISMATCH")
+                    and any(g["par"] in ("tp", "fsdp_tp") and "emb" in g.get("tp", {}) for g in c.get("segs", []))
+                )
+            )
+        ),
+        "K201700-compile-async-tp-input",
+    ),
+    # VERIFIED §34: SGD momentum clones a Partial(sum) SP norm grad, DCP refuses to save the Partial buffer
+    (lambda s, f, c: "partial placements" in _tb(f) or "partial placements" in s, "N34-sp-partial-momentum"),
     (lambda s, f, c: "mixed torch.Tensor and DTensor" in s, "K183207-mixed-tensor-dtensor"),
     (lambda s, f, c: "aten.stack" in s and "mesh" in s, "K180346-clip-across-meshes"),
     (lambda s, f, c: "extra.step=-1" in f.get("msg", ""), "K4-flatten-false"),

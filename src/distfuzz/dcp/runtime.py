@@ -910,6 +910,10 @@ def load_ckpt(scn, ld, sv_prev, model, opt, path, rank):
 
 _READER = r"""
 import sys, torch
+try:  # float8 checkpoints hold torchao tensor subclasses
+    import torchao.float8  # noqa: F401
+except ImportError:
+    pass
 from torch.distributed.checkpoint.format_utils import dcp_to_torch_save
 dcp_to_torch_save(sys.argv[1], sys.argv[2])
 """
@@ -925,7 +929,8 @@ def read_ckpt(path):
         [sys.executable, "-c", _READER, path, tmp],
         capture_output=True,
         text=True,
-        env=dict(os.environ, OMP_NUM_THREADS="1"),
+        # the harness reads its own checkpoints: allow the tensor subclasses weights_only rejects (torchao float8)
+        env=dict(os.environ, OMP_NUM_THREADS="1", TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD="1"),
         timeout=120,
     )
     if r.returncode:
