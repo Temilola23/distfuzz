@@ -14,6 +14,10 @@ MESH_SHAPES = {4: {"1d": (4,), "2d": (2, 2)}, 3: {"1d": (3,)}, 2: {"1d": (2,)}, 
 NAME_RE = re.compile(r"\bv\d+\b")
 MUT_RE = re.compile(r"_\(|SETITEM|BW\(")
 MESH_NDIM = {"1d": 1, "2d": 2}
+FOREACH_UNARY = (
+    "abs acos asin atan ceil cos cosh erf erfc exp expm1 floor frac lgamma log log10 log1p log2 neg reciprocal round "
+    "rsqrt sigmoid sign sin sinh sqrt tan tanh trunc"
+).split()
 
 LAMBDAS = [
     "lambda a: torch.relu(a) + 1",
@@ -186,9 +190,10 @@ class Gen:
                 "loss",
                 "nn",
                 "linalg",
+                "tail",
                 "compile",
             ],
-            [12, 10, 12, 16, 7, 6, 8, 14, 4, 9, 6, 2 if self.allow_compile else 0],
+            [12, 10, 12, 16, 7, 6, 8, 14, 4, 9, 6, 6, 2 if self.allow_compile else 0],
         )[0]
         return getattr(self, "p_" + cat)(prog, env, names, x, t)
 
@@ -947,10 +952,7 @@ class Gen:
                 f"torch._foreach_clamp_min([{x}, {y}], 0)[{k}]",
                 f"torch._foreach_clamp_max([{x}, {y}], 1)[{k}]",
             ]
-            un = r.choice(
-                "abs acos asin atan ceil cos cosh erf erfc exp expm1 floor frac lgamma log log10 log1p log2 neg "
-                "reciprocal round rsqrt sigmoid sign sin sinh sqrt tan tanh trunc".split()
-            )
+            un = r.choice(FOREACH_UNARY)
             if fl:
                 ops += [
                     f"torch._foreach_norm([{x}, {y}])[{k}]",
@@ -1184,6 +1186,190 @@ class Gen:
                 f"torch.linalg.ldl_factor({a})[0]",
             ]
         return r.choice(ops)
+
+    def p_tail(self, prog, env, names, x, t):
+        """Strategy-table ops no other group emits, drawn uniformly so each one is reached: torch.special functions,
+        the remaining _foreach variants, fused Adam, functional batch-norm variants, prims, *_copy views and aten
+        functional forms. Domains are restricted where an out-of-domain value would raise on some shards only."""
+        r = self.rng
+        nd = t.dim()
+        dt = self.dtcode(t)
+        ops = []
+        if t.dtype in (torch.int64, torch.int32):
+            ops += [f"{x}.__ilshift__(1)", f"{x}.__irshift__(1)"]
+        if not t.is_floating_point():
+            return r.choice(ops) if ops else None
+        full = t.dtype in (torch.float32, torch.float64)
+        pos = t.numel() > 0 and bool((t > 0).all())
+        a = f"{x}.abs() + 0.5"
+        ops += [
+            f"torch.angle({x})",
+            f"torch.ops.aten.gelu_({x})",
+            f"torch.ops.aten.conj_physical_({x})",
+            f"{x}.new_empty((2, 3)).fill_(1)",
+            f"{x} * torch.ops.aten.is_same_size({x}, {x} + 1)",
+            # signs of zeros are not kept by Partial(sum) (see p_unary), so no zero reaches signbit and copysign
+            # takes its sign from a positive tensor
+            f"torch.signbit(torch.where({x} == 0, 1.0, {x}))",
+            f"torch.copysign({x}, {a})",
+            f"{x}.copysign_({a})",
+            f"torch.ops.prims.convert_element_type({x}, torch.float64)",
+            f"torch.ops.prims.view_of({x})",
+            f"torch.ops.prims.copy_to({x}.clone(), {x} * 3)",
+            f"torch.ops.aten.native_dropout({x}, 0.0, True)[0]",
+            f"torch.ops.aten.native_dropout_backward({x}, {x} == {x}, 1.0)",
+            f"{x}.ldexp_({x}.abs().floor() % 3)",
+            f"{x}.polygamma_(1)",
+            f"torch.view_copy({x}, (-1,))",
+            f"torch.ops.aten.norm({x}, 2)",
+        ]
+        if pos:
+            ops += [f"{x}.mvlgamma_(1)", f"{x}.igamma_({a})", f"{x}.igammac_({a})"]
+        if full:
+            sp = "torch.special."
+            ops += [
+                f"{sp}airy_ai({x})",
+                f"{sp}bessel_y0({a})",
+                f"{sp}bessel_y1({a})",
+                f"{sp}modified_bessel_i1({x})",
+                f"{sp}modified_bessel_k0({a})",
+                f"{sp}modified_bessel_k1({a})",
+                f"{sp}scaled_modified_bessel_k0({a})",
+                f"{sp}scaled_modified_bessel_k1({a})",
+                f"{sp}hermite_polynomial_he({x}, {r.randint(0, 4)})",
+                f"{sp}laguerre_polynomial_l({x}, {r.randint(0, 4)})",
+                f"torch.igamma({a}, {x}.abs() * 0.5 + 0.1)",
+                f"torch.igammac({a}, {x}.abs() * 0.5 + 0.1)",
+                f"torch.view_as_real(torch.complex({x}, {x} * 2))",
+                f"torch.ops.aten.linalg__powsum({x}, {r.choice([1, 2, 3])})",
+                # these have strategies only as prims (torch.special decomposes to other ops)
+                f"torch.ops.prims.zeta({a}, {x}.abs() + 1)",
+            ]
+            ops += [f"torch.ops.prims.{f}({x})" for f in "erfcx bessel_j0 bessel_j1 spherical_bessel_j0".split()]
+            ops += [f"torch.ops.prims.{f}({x})" for f in "bessel_i0e bessel_i1 bessel_i1e".split()]
+            ops.append(f"torch.ops.prims.ndtri(torch.sigmoid({x}))")
+            ops += [f"{sp}chebyshev_polynomial_{k}({x}.clamp(-1, 1), {r.randint(0, 4)})" for k in "uvw"]
+            ops += [f"{sp}shifted_chebyshev_polynomial_{k}(torch.sigmoid({x}), {r.randint(0, 4)})" for k in "tuvw"]
+        if nd >= 1:
+            d = r.randrange(nd)
+            sz = t.shape[d]
+            shp = list(t.shape)
+            grown = shp[:d] + ([-1] if sz != 1 else [3]) + shp[d + 1 :]
+            ops += [
+                f"torch.ops.aten._safe_softmax({x}, {d})",
+                f"torch.ops.aten.norm({x}, {r.choice([1, 2, 3])}, [{d}])",
+                f"torch.expand_copy({x}.narrow({d}, 0, {min(sz, 1)}), {grown})",
+            ]
+            if sz:
+                cut = r.randint(0, sz)
+                ops.append(f"torch.split_with_sizes_copy({x}, [{cut}, {sz - cut}], {d})[{r.randrange(2)}]")
+
+            # partner inputs are only made for the op that is drawn
+            def bucketize():
+                b = self.partner(prog, env, [r.randint(1, 4)], dt)
+                return f"torch.bucketize({x}, {b}.sort()[0])"
+
+            def index_put_impl():
+                idx = self.idx_input(prog, env, [r.randint(0, 4)], t.shape[0])
+                v = self.partner(prog, env, [env[idx].shape[0], *shp[1:]], dt)
+                return f"torch.ops.aten._index_put_impl_({x}, [{idx}], {v}, True)"
+
+            def scatter_add_():
+                gidx = self.idx_input(prog, env, shp, sz)
+                return f"{x}.scatter_add_({d}, {gidx}, {x} * 2)"
+
+            ops.append(bucketize)
+            if sz:
+                ops.append(scatter_add_)
+            if t.shape[0]:
+                ops.append(index_put_impl)
+        if full:
+            same = [n for n in names if tuple(env[n].shape) == tuple(t.shape) and env[n].dtype == t.dtype and n != x]
+            if same:
+                y, k = r.choice(same), r.randrange(2)
+                xc, yc = f"{x}.clone()", f"{y}.clone()"
+                if r.random() < 0.3:
+                    # every unary _foreach op, plain and in place; p_nn draws one at random among many other ops,
+                    # so single variants are otherwise missed for whole campaigns
+                    un = r.choice(FOREACH_UNARY)
+                    return f"torch._foreach_{un}{r.choice(['', '_'])}([{x}, {y}])[{k}]"
+                for op in "atan erfc lgamma log2 round sigmoid sin".split():
+                    ops.append(f"torch._foreach_{op}([{x}, {y}])[{k}]")
+                for op in (
+                    "asin_ ceil_ cos_ cosh_ erf_ exp_ expm1_ floor_ frac_ log1p_ log_ reciprocal_ rsqrt_ sin_ "
+                    "tan_ tanh_ trunc_".split()
+                ):
+                    ops.append(f"torch._foreach_{op}([{x}, {y}])[{k}]")
+                ops += [
+                    f"torch._foreach_clamp_max_([{x}, {y}], 1)[{k}]",
+                    f"torch._foreach_maximum_([{x}, {y}], [{yc}, {xc}])[{k}]",
+                    f"torch._foreach_minimum_([{x}, {y}], [{yc}, {xc}])[{k}]",
+                    f"torch._foreach_powsum([{x}, {y}], 2)[{k}]",
+                    f"torch._amp_foreach_non_finite_check_and_unscale_([{x}, {y}], {x}.new_zeros(1), "
+                    f"{x}.new_full((1,), 0.5))",
+                ]
+                for fused in ("_fused_adam", "_fused_adamw"):
+                    # params x, y; grads, exp_avg, exp_avg_sq (and max_exp_avg_sq) from fresh clones; step 1
+                    ams = r.random() < 0.3
+                    args = (
+                        f"[{yc}, {xc}], [{xc} * 0.5, {yc} * 0.5], [{xc}.abs(), {yc}.abs()], "
+                        f"[{f'{xc}.abs() + 1, {yc}.abs() + 1' if ams else ''}], "
+                        f"[{x}.new_ones(()), {x}.new_ones(())], lr=0.1, beta1=0.9, beta2=0.99, "
+                        f"weight_decay={r.choice([0.0, 0.01])}, eps=1e-8, amsgrad={ams}, maximize={r.random() < 0.2}"
+                    )
+                    ops.append(f"torch.{fused}_([{x}, {y}], {args})")
+                    ops.append(f"torch.ops.aten.{fused}([{x}, {y}], {args})[{r.randrange(4)}][{k}]")
+                if nd == 2:
+
+                    def foreach_mm():
+                        w = self.partner(prog, env, [t.shape[1], r.randint(1, 4)], dt)
+                        return f"torch._foreach_mm([{x}, {y}], [{w}, {w}])[{k}]"
+
+                    ops.append(foreach_mm)
+        if full and 3 <= nd <= 5 and t.shape[1]:
+            c = t.shape[1]
+            rm, rv = f"{x}.new_zeros({c})", f"{x}.new_ones({c})"
+            eps = r.choice([1e-5, 0.1])
+            ops += [
+                f"torch.ops.aten._native_batch_norm_legit_no_training({x}, None, None, {rm}, {rv}, 0.1, {eps})[0]",
+                f"torch.ops.aten._native_batch_norm_legit({x}, None, None, {rm}, {rv}, True, 0.1, {eps})[0]",
+                f"torch.ops.aten._native_batch_norm_legit_functional({x}, None, None, {rm}, {rv}, True, 0.1, {eps})[0]",
+                f"torch.ops.aten._batch_norm_with_update({x}, None, None, {rm}, {rv}, 0.1, {eps})[0]",
+                f"torch.ops.aten._batch_norm_with_update_functional({x}, None, None, {rm}, {rv}, 0.1, {eps})[0]",
+            ]
+        if full and nd in (3, 4, 5) and t.shape[1]:
+            # 3-D ops take x lifted to (N, C, D, H, W); 2-D ones take 4-D inputs as they are
+            v = f"{x}{'[None]' * (5 - nd)}"
+            n, c, *sp = [1] * (5 - nd) + list(t.shape)
+            # fractional pooling needs output + kernel - 1 < input in every dim, so no dim of size 0 or 1
+            if all(s >= 2 for s in sp):
+                k3 = [1 if s == 2 else 2 for s in sp]
+                out3 = [s - k for s, k in zip(sp, k3)]
+                ops.append(
+                    f"torch.ops.aten.fractional_max_pool3d({v}, {k3}, {out3}, {v}.new_full(({n}, {c}, 3), 0.5))[0]"
+                )
+            if all(sp):
+                kp = [2 if s % 2 == 0 else 1 for s in sp]
+                ops.append(f"F.max_unpool3d(*F.max_pool3d({v}, {kp}, return_indices=True), {kp})")
+            if nd == 4:
+                if all(s >= 2 for s in t.shape[2:]):
+                    k2 = [1 if s == 2 else 2 for s in t.shape[2:]]
+                    out2 = [s - k for s, k in zip(t.shape[2:], k2)]
+                    ops.append(
+                        f"torch.ops.aten.fractional_max_pool2d({x}, {k2}, {out2}, "
+                        f"{x}.new_full(({t.shape[0]}, {t.shape[1]}, 2), 0.5))[0]"
+                    )
+                ops.append(f"torch.ops.aten._upsample_lanczos2d_aa({x}, [{r.randint(1, 5)}, {r.randint(1, 5)}], False)")
+
+            def grid_sample_3d():
+                g = self.partner(prog, env, [n, 2, 2, 2, 3], dt)
+                return f"F.grid_sample({v}, torch.tanh({g}), align_corners=False)"
+
+            ops.append(grid_sample_3d)
+        if not ops:
+            return None
+        op = r.choice(ops)
+        return op() if callable(op) else op
 
     def p_compile(self, prog, env, names, x, t):
         lam = self.rng.choice(LAMBDAS)

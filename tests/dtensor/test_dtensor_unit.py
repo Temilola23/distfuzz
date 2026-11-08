@@ -181,11 +181,16 @@ def test_nn_ops_cover_every_family_and_evaluate():
 
 
 def test_no_ops_that_depend_on_the_sign_of_zero():
-    # sum over ranks turns -0.0 into +0.0, so these would report false mismatches on Partial(sum) inputs
+    # sum over ranks turns -0.0 into +0.0, so these would report false mismatches on Partial(sum) inputs. The tail
+    # group's forms are safe: copysign takes its sign from |x| + 0.5 and signbit never sees a zero
+    safe = re.compile(r"copysign_?\((?:v\d+, )?v\d+\.abs\(\) \+ 0\.5\)|torch\.signbit\(torch\.where\((v\d+) == 0, 1\.0, \1\)\)")
     gen = Gen(4, random.Random(5))
     for _ in range(60):
         p = gen.generate()
-        assert not [s["expr"] for s in p["steps"] if re.search(r"copysign|signbit", s["expr"])]
+        for st in p["steps"]:
+            e = st["expr"]
+            if re.search(r"copysign|signbit", e):
+                assert safe.search(e), e
 
 
 def test_mutate_programs_are_ref_valid():
@@ -423,3 +428,38 @@ def test_matmul_takes_integer_inputs(dt):
             assert not out.is_floating_point(), expr
             seen.add(opname(expr))
     assert {"baddbmm", "addbmm", "linear", "addmv", "addr"} <= seen, seen
+
+
+def test_tail_ops_evaluate_on_plain_tensors():
+    # each draw must give a valid expression for most inputs, or the group only adds failed proposals
+    gen = Gen(4, random.Random(6))
+    ok = tried = 0
+    names = set()
+    for shape, dt in [([3, 4], "f32"), ([2, 3, 4], "f64"), ([1, 2, 4, 4], "f32"), ([2, 2, 2, 2, 2], "f32"), ([5], "i64")]:
+        for _ in range(80):
+            prog = dict(mesh="1d", inputs=[], steps=[], nv=0)
+            for _ in range(2):
+                j = gen.new_input(prog, shape, dt)
+                prog["steps"].append(dict(out=gen.fresh_name(prog), expr=f"mk({j})"))
+            env = gen.replay(prog)[0]
+            expr = gen.p_tail(prog, env, ["v0", "v1"], "v0", env["v0"])
+            if expr is None:
+                continue
+            env = gen.replay(prog)[0]
+            tried += 1
+            try:
+                out = eval(expr, env)
+            except Exception:
+                continue
+            assert out is None or isinstance(out, torch.Tensor), expr
+            ok += 1
+            names.add(opname(expr))
+    assert ok >= 0.85 * tried, (ok, tried)
+    assert {"airy_ai", "erfcx", "_fused_adam_", "_fused_adamw", "_native_batch_norm_legit", "__ilshift__"} <= names
+    assert {"fractional_max_pool3d", "_safe_softmax", "split_with_sizes_copy", "_foreach_powsum"} <= names
+
+
+def test_opname_torch_ops_namespace():
+    assert opname("torch.ops.aten._safe_softmax(v1, 0)") == "_safe_softmax"
+    assert opname("torch.ops.prims.view_of(v0)") == "view_of"
+    assert opname("torch.ops.aten.norm.ScalarOpt_dim(v1, 2, [0])") == "norm"
