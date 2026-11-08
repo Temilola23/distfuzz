@@ -3,12 +3,27 @@ import hashlib
 import math
 import os
 import re
+import sys
 import traceback
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
+
+# minimize.emit inlines blocks.py ahead of this file, so emitted repros skip this import
+if "MoE" not in globals():
+    from distfuzz.dcp.blocks import (
+        MOE_STATS,
+        LoRAMLP,
+        MoE,
+        apply_ac,
+        apply_ep,
+        clip_grads,
+        expert_params,
+        has_empty_local,
+        replicate_leftovers,
+    )
 
 DT = {"f64": torch.float64, "f32": torch.float32, "bf16": torch.bfloat16, "f16": torch.float16}
 
@@ -54,9 +69,12 @@ class Attn(nn.Module):
 
 
 class LN(nn.Module):
-    def __init__(self, d, affine, bias):
+    def __init__(self, d, affine, bias, rms=False):
         super().__init__()
-        self.ln = nn.LayerNorm(d, elementwise_affine=affine, bias=bias)
+        if rms:  # torchtitan / HF llama norms
+            self.ln = nn.RMSNorm(d, eps=1e-6, elementwise_affine=affine)
+        else:
+            self.ln = nn.LayerNorm(d, elementwise_affine=affine, bias=bias)
 
     def forward(self, x):
         return self.ln(x)
@@ -103,7 +121,11 @@ class Net(nn.Module):
             elif t == "attn":
                 blocks.append(Attn(d, b["nh"], b["bias"]))
             elif t == "ln":
-                blocks.append(LN(d, b["affine"], b["bias"]))
+                blocks.append(LN(d, b["affine"], b["bias"], b.get("rms", False)))
+            elif t == "lora":
+                blocks.append(LoRAMLP(d, b["h"], b["r"], b["alpha"], b["bias"]))
+            elif t == "moe":
+                blocks.append(MoE(d, b))
             elif t == "buf":
                 blocks.append(Buf(d))
         self.blocks = nn.ModuleList(blocks)
@@ -113,6 +135,10 @@ class Net(nn.Module):
         for i in m.get("frozen", []):
             for p in self.blocks[i].parameters():
                 p.requires_grad_(False)
+        if m.get("lora_only"):  # torchtune LoRA recipes train the adapters only
+            for n, p in self.named_parameters():
+                if "lora_" not in n:
+                    p.requires_grad_(False)
 
     def forward(self, x):
         h = self.emb(x) if self.kind == "tok" else x
@@ -207,11 +233,16 @@ def tp_plan(scn, seg):
                 else ColwiseParallel(output_layouts=Replicate())
             )
         elif name == "head":
-            plan["head"] = (
-                ColwiseParallel(output_layouts=Replicate())
-                if style == "col"
-                else RowwiseParallel(input_layouts=Replicate())
-            )
+            if style == "col_lp":  # torchtitan lm_head under loss_parallel: vocab-sharded logits stay DTensors
+                from torch.distributed.tensor import Shard
+
+                plan["head"] = ColwiseParallel(output_layouts=Shard(-1), use_local_output=False)
+            else:
+                plan["head"] = (
+                    ColwiseParallel(output_layouts=Replicate())
+                    if style == "col"
+                    else RowwiseParallel(input_layouts=Replicate())
+                )
         else:
             i = int(name)
             t = scn["model"]["blocks"][i]["t"]
@@ -242,11 +273,15 @@ def parallelize(scn, seg, model, meshes):
     if par == "ddp":
         from torch.nn.parallel import DistributedDataParallel as DDP
 
+        apply_ac(model, scn.get("ac"))
         return DDP(
             model, broadcast_buffers=seg.get("ddp_bcast", True), gradient_as_bucket_view=seg.get("ddp_gabv", False)
         )
     if par == "tp":
         parallelize_module(model, meshes["1d"], tp_plan(scn, seg))
+        if scn.get("profile") == "train":
+            replicate_leftovers(model, meshes["1d"])
+        apply_ac(model, scn.get("ac"))
         return model
     mp = seg.get("mp")
     mpp = MixedPrecisionPolicy(
@@ -255,23 +290,43 @@ def parallelize(scn, seg, model, meshes):
     if par == "fsdp_tp":
         m2 = meshes[mesh_key(seg)]
         parallelize_module(model, m2["tp"], tp_plan(scn, seg))
+        if scn.get("profile") == "train":
+            replicate_leftovers(model, m2["tp"])
         fmesh = m2["dp"]
     elif par == "hsdp":
         fmesh = meshes[mesh_key(seg)]
     else:
         fmesh = meshes["1d"]
+    ign = set()
+    if par == "ep":  # experts Shard(0) over the 1-D mesh, FSDP2 for the rest (torchtitan: experts outside dp_shard)
+        apply_ep(model, meshes["1d"], seg.get("a2a", "functional"), meshes.get("_ep_pg"))
+        ign = set(expert_params(model))
+    apply_ac(model, scn.get("ac"))
     raf = seg.get("raf", True)
     for u in seg.get("units", []):
         mod = model.emb if u == "emb" else model.head if u == "head" else model.blocks[int(u)]
         r = raf
         if isinstance(r, int) and not isinstance(r, bool):
             r = r if fmesh.ndim == 1 and fmesh.size() % r == 0 and fmesh.size() > r else True
-        fully_shard(mod, mesh=fmesh, reshard_after_forward=r, mp_policy=mpp)
-    fully_shard(model, mesh=fmesh, reshard_after_forward=bool(seg.get("raf_root", True)), mp_policy=mpp)
+        fully_shard(
+            mod,
+            mesh=fmesh,
+            reshard_after_forward=r,
+            mp_policy=mpp,
+            ignored_params=(ign & set(mod.parameters())) or None,
+        )
+    fully_shard(
+        model,
+        mesh=fmesh,
+        reshard_after_forward=bool(seg.get("raf_root", True)),
+        mp_policy=mpp,
+        ignored_params=ign or None,
+    )
     return model
 
 
 def canon(name):
+    name = name.replace("_checkpoint_wrapped_module.", "")
     return name[len("module.") :] if name.startswith("module.") else name
 
 
@@ -357,22 +412,44 @@ def cmp_states(ref, got, rtol, atol, exact=False):
     return diffs
 
 
-def ref_run(scn, nsteps):
+def clip_cfg(scn):
+    c = scn.get("clip")
+    if not c:
+        return None
+    return {"max": c} if isinstance(c, (int, float)) else c
+
+
+def micro_batches(scn, step, dp=1, dpr=0):
+    """The step's batch split into `accum` micro-batches, then this rank's 1/dp of each."""
+    x, y = batch(scn, step)
+    k = scn.get("accum", 1)
+    m = x.shape[0] // k
+    n = m // dp
+    return [(x[i * m + dpr * n : i * m + (dpr + 1) * n], y[i * m + dpr * n : i * m + (dpr + 1) * n]) for i in range(k)]
+
+
+def ref_run(scn, nsteps, reset_opt_at=()):
     model = build_model(scn, scn["seed"])
     opt = build_optim(scn, [p for p in model.parameters() if p.requires_grad])
-    losses, states = [], {0: gather(model, opt)}
+    losses, gnorms, states = [], [], {0: gather(model, opt)}
+    cc = clip_cfg(scn)
     for s in range(nsteps):
-        x, y = batch(scn, s)
+        if s in reset_opt_at:  # a model-only checkpoint restarts the optimizer from scratch
+            opt = build_optim(scn, [p for p in model.parameters() if p.requires_grad])
         model.train()
-        loss = loss_fn(scn, model(x), y)
-        loss.backward()
-        if scn.get("clip"):
-            torch.nn.utils.clip_grad_norm_([p for p in model.parameters() if p.requires_grad], scn["clip"])
+        tot = 0.0
+        mbs = micro_batches(scn, s)
+        for x, y in mbs:
+            loss = loss_fn(scn, model(x), y) / len(mbs)
+            loss.backward()
+            tot += loss.item()
+        if cc:
+            gnorms.append(clip_grads([p for p in model.parameters() if p.requires_grad], dict(cc, impl="torch")))
         opt.step()
         opt.zero_grad(set_to_none=scn.get("zg_none", True))
-        losses.append(loss.item())
+        losses.append(tot)
         states[s + 1] = gather(model, opt)
-    return losses, states
+    return losses, gnorms, states
 
 
 def sdo(**kw):
@@ -491,25 +568,34 @@ def load_ckpt(scn, ld, sv_prev, model, opt, path, rank):
         state = {"app": app, "extra": extra}
         dcp.load(state, storage_reader=reader, planner=planner)
         return state["extra"]
-    if mode == "full_bcast":
+    if mode in ("full_bcast", "full_bcast_split", "model_bcast"):
         opts = sdo(full_state_dict=True, cpu_offload=True, ignore_frozen_params=ign, flatten_optimizer_state_dict=fos)
-        m, o = get_state_dict(model, opt, options=opts)  # rank0 full, others empty
-        state = {"model": m, "optim": o, "extra": extra}
+        if mode == "model_bcast":
+            # model only (torchtune / accelerate): get_state_dict would also run DSD's zero-lr optimizer init step
+            from torch.distributed.checkpoint.state_dict import get_model_state_dict
+
+            state = {"model": get_model_state_dict(model, options=opts), "extra": extra}
+        else:
+            m, o = get_state_dict(model, opt, options=opts)  # rank0 full, others empty
+            state = {"model": m, "optim": o, "extra": extra}
         if rank == 0:
             dcp.load(state, storage_reader=reader, planner=planner, no_dist=True)
-        set_state_dict(
-            model,
-            opt,
-            model_state_dict=state["model"],
-            optim_state_dict=state["optim"],
-            options=sdo(
-                full_state_dict=True,
-                broadcast_from_rank0=True,
-                cpu_offload=ld.get("bcast_offload", False),
-                ignore_frozen_params=ign,
-                flatten_optimizer_state_dict=fos,
-            ),
+        bopts = sdo(
+            full_state_dict=True,
+            broadcast_from_rank0=True,
+            cpu_offload=ld.get("bcast_offload", False),
+            ignore_frozen_params=ign,
+            flatten_optimizer_state_dict=fos,
         )
+        if mode == "full_bcast":
+            set_state_dict(model, opt, model_state_dict=state["model"], optim_state_dict=state["optim"], options=bopts)
+        else:
+            # torchtune load_from_full_model_state_dict / accelerate cpu_ram_efficient_loading: split API
+            from torch.distributed.checkpoint.state_dict import set_model_state_dict
+
+            set_model_state_dict(model, state["model"], options=bopts)
+            if mode == "full_bcast_split":
+                set_optimizer_state_dict(model, opt, state["optim"], options=bopts)
         t = torch.tensor([state["extra"]["step"].item() if rank == 0 else 0])
         dist.broadcast(t, 0)
         return {"step": t, "tag": ""}
@@ -627,12 +713,33 @@ def run_segment(rt, scn, si, workdir):
     rtol, atol = tol(scn, dict(seg, mp_any=mp_any))
     pair = (segs[si - 1]["par"] + "->" if si else "") + seg["par"]
 
+    cur = {"sub": None, "phase": None}
+
+    def mark(phase=None, sub=None):
+        # the harness reads the last marker of a rank that hangs (World.hang_report)
+        if phase is not None:
+            cur["phase"] = phase
+        cur["sub"] = sub
+        full = cur["phase"] + (":" + sub if sub else "")
+        print(f"DISTFUZZ_PHASE rank={rank} phase={full}", file=sys.stderr, flush=True)
+
+    tags = {}
+    for k in MOE_STATS:
+        MOE_STATS[k] = False
+
     def sync(phase, fn):
         err, tb = None, None
+        mark(phase)
         try:
             val = fn()
-        except Exception as e:  # noqa
+        except BaseException as e:  # noqa: B036 (DCP's CheckpointException derives from BaseException)
+            if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                raise
             err, tb, val = e, traceback.format_exc(), None
+            if cur["sub"]:
+                phase = f"{phase}:{cur['sub']}"
+            # the harness reads this line if the other ranks then hang (error on some ranks, hang on the rest)
+            print(f"DISTFUZZ_ERR rank={rank} phase={phase} msg={norm_msg(err)}", file=sys.stderr, flush=True)
         t = torch.tensor([1 if err is not None else 0])
         flags = [torch.zeros(1, dtype=torch.long) for _ in range(W)]
         dist.all_gather(flags, t)
@@ -671,8 +778,13 @@ def run_segment(rt, scn, si, workdir):
 
     try:
         if rank == 0:
-            rl, rs = ref_run(scn, end + extra_steps)
-            ref["losses"], ref["states"] = rl, rs
+            resets = [
+                sum(x["steps"] for x in segs[:j])
+                for j in range(1, si + 1)
+                if segs[j].get("load", {}).get("mode") == "model_bcast"
+            ]
+            rl, rg, rs = ref_run(scn, end + extra_steps, reset_opt_at=resets)
+            ref["losses"], ref["gnorms"], ref["states"] = rl, rg, rs
 
         # 1. build
         def build():
@@ -694,7 +806,8 @@ def run_segment(rt, scn, si, workdir):
         model, opt = sync("build", build)
         dp, dpr = dp_info(seg, rank, meshes)
         B = scn["batch"]
-        assert B % dp == 0
+        assert B % (dp * scn.get("accum", 1)) == 0
+        tags["empty_shard"] = has_empty_local(model)
 
         # 2. load
         if si > 0:
@@ -715,6 +828,9 @@ def run_segment(rt, scn, si, workdir):
                             msg=f"extra.step={int(ex['step'])} expected {start}",
                         )
                     )
+                if seg.get("load", {}).get("mode") == "model_bcast":  # optimizer restarts: compare the model only
+                    saved = {k: v for k, v in saved.items() if not k.startswith("o:")}
+                    g = {k: v for k, v in g.items() if not k.startswith("o:")}
                 d = cmp_states(saved, g, 0, 0, exact=True)
                 # get_state_dict lazily creates zero optimizer state; that is equivalent to "no state yet"
                 d = [(k, m) for k, m in d if not (m == "unexpected" and k.startswith("o:") and not g[k].any())]
@@ -728,6 +844,9 @@ def run_segment(rt, scn, si, workdir):
                 if rank == 0:
                     try:
                         a, b = read_ckpt(ppath), read_ckpt(rpath)
+                        if seg.get("load", {}).get("mode") == "model_bcast":  # optimizer restarted on purpose
+                            a = {k: v for k, v in a.items() if not k.startswith("optim.")}
+                            b = {k: v for k, v in b.items() if not k.startswith("optim.")}
                         report("ROUNDTRIP_MISMATCH", cmp_ckpt(a, b))
                     except Exception as e:  # noqa
                         F_.append(
@@ -746,23 +865,51 @@ def run_segment(rt, scn, si, workdir):
                 raise Stop()
 
         # 3. train
-        losses = []
+        losses, gnorms = [], []
+        cc = clip_cfg(scn)
+        lp = seg.get("tp", {}).get("head") == "col_lp"
+        eparams = expert_params(model) if seg["par"] == "ep" else []
 
         def train(s0, s1):
+            import contextlib
+
             for s in range(s0, s1):
-                x, y = batch(scn, s)
-                n = B // dp
-                x, y = x[dpr * n : (dpr + 1) * n], y[dpr * n : (dpr + 1) * n]
                 model.train()
-                loss = loss_fn(scn, model(x), y)
-                loss.backward()
-                if scn.get("clip"):
-                    torch.nn.utils.clip_grad_norm_([p for p in model.parameters() if p.requires_grad], scn["clip"])
+                mbs = micro_batches(scn, s, dp, dpr)
+                tot = torch.zeros((), dtype=torch.float64)
+                for i, (x, y) in enumerate(mbs):
+                    last = i == len(mbs) - 1
+                    ctx = contextlib.nullcontext()
+                    if scn.get("no_sync") and len(mbs) > 1:
+                        if seg["par"] == "ddp" and not last:
+                            ctx = model.no_sync()
+                        elif hasattr(model, "set_requires_gradient_sync"):  # accelerate's FSDP2 no_sync
+                            model.set_requires_gradient_sync(last)
+                    if lp:
+                        from torch.distributed.tensor.parallel import loss_parallel
+
+                        ctx = loss_parallel()
+                    with ctx:
+                        mark(sub="fwd")
+                        loss = loss_fn(scn, model(x), y) / len(mbs)
+                        mark(sub="bwd")
+                        loss.backward()
+                    lv = loss.detach()
+                    tot += (lv.full_tensor() if hasattr(lv, "full_tensor") else lv).double()
+                for p in eparams:  # experts see every rank's tokens; FSDP averages the rest over dp
+                    if p.grad is not None:
+                        p.grad.div_(dp)
+                if cc:
+                    mark(sub="clip")
+                    gnorms.append(clip_grads([p for p in model.parameters() if p.requires_grad], cc))
+                mark(sub="opt")
                 opt.step()
                 opt.zero_grad(set_to_none=scn.get("zg_none", True))
-                lt = loss.detach().double().reshape(1).clone()
+                mark(sub="log")
+                lt = tot.reshape(1).clone()
                 dist.all_reduce(lt)
                 losses.append(lt.item() / W)
+            cur["sub"] = None
 
         sync("train", lambda: train(start, end))
         if rank == 0:
@@ -776,6 +923,22 @@ def run_segment(rt, scn, si, workdir):
                 F_.append(
                     dict(
                         kind="LOSS_MISMATCH",
+                        phase="check",
+                        pair=pair,
+                        seg=si,
+                        msg="first bad step {:d} ref={:.10g} got={:.10g} ({:d} bad)".format(*bad[0], len(bad)),
+                    )
+                )
+            rg = ref["gnorms"][start:end]
+            bad = [
+                (start + i, a, b)
+                for i, (a, b) in enumerate(zip(rg, gnorms))
+                if not math.isclose(a, b, rel_tol=rtol, abs_tol=atol)
+            ]
+            if bad and not mp_any:
+                F_.append(
+                    dict(
+                        kind="GNORM_MISMATCH",
                         phase="check",
                         pair=pair,
                         seg=si,
@@ -808,4 +971,5 @@ def run_segment(rt, scn, si, workdir):
             sync("post_save_barrier", lambda: dist.barrier())
     except Stop:
         pass
-    return dict(findings=F_, hashes=hashes)
+    tags.update(MOE_STATS)
+    return dict(findings=F_, hashes=hashes, tags=tags)

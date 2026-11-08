@@ -33,6 +33,7 @@ def _rank_main(rank, W, port, scn, si, workdir, q):
     for a in range(1, W + 1):
         if W % a == 0:
             meshes[f"2d:{a},{W // a}"] = init_device_mesh("cpu", (a, W // a), mesh_dim_names=("dp", "tp"))
+    meshes["_ep_pg"] = dist.new_group(backend="gloo")
     rt = dict(rank=rank, world=W, meshes=meshes, ckpt_pg=dist.new_group(backend="gloo"))
     try:
         res = run_segment(rt, scn, si, workdir)  # noqa: F821 (provided by runtime)

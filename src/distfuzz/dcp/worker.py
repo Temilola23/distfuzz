@@ -55,12 +55,13 @@ def main():
         init_method=f"tcp://127.0.0.1:{args.port}",
         rank=args.rank,
         world_size=W,
-        timeout=datetime.timedelta(seconds=30),
+        timeout=datetime.timedelta(seconds=int(os.environ.get("DCP_PG_TIMEOUT", 30))),
     )
     meshes = {"1d": init_device_mesh("cpu", (W,))}
     for a in range(1, W + 1):
         if W % a == 0:
             meshes[f"2d:{a},{W // a}"] = init_device_mesh("cpu", (a, W // a), mesh_dim_names=("dp", "tp"))
+    meshes["_ep_pg"] = dist.new_group(backend="gloo")
     rt = dict(rank=args.rank, world=W, meshes=meshes, ckpt_pg=dist.new_group(backend="gloo"))
 
     proto.write(json.dumps({"ready": True, "rank": args.rank}) + "\n")
