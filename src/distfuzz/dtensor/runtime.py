@@ -35,7 +35,17 @@ def gen_full(spec):
         return torch.randint(0, hi, shape, generator=g, dtype=torch.int64)
     if dt == torch.bool:
         return torch.randint(0, 2, shape, generator=g).bool()
-    return torch.randint(-4, 5, shape, generator=g).to(dt)
+    T = torch.randint(-4, 5, shape, generator=g)
+    kind = spec.get("kind")
+    if kind in ("dd", "spd") and len(shape) >= 2 and shape[-1] == shape[-2]:
+        # square matrices for linalg: "dd" is strictly diagonally dominant (invertible, LU needs no pivoting luck),
+        # "spd" is also symmetric with a positive diagonal, so Cholesky and LDL succeed. Still integer-valued.
+        n = shape[-1]
+        if kind == "spd":
+            T = T + T.transpose(-1, -2)
+        eye = torch.eye(n, dtype=T.dtype)
+        T = T * (1 - eye) + eye * (8 * n + 1)
+    return T.to(dt)
 
 
 def partial_pieces(T, n, op, seed):

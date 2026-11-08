@@ -326,3 +326,98 @@ def test_minimize_target_step_not_pinned():
     mp, status = minimize(prog, "MISMATCH|max|values", StubTester("max("), 4)
     assert status == "ok"
     assert len(mp["steps"]) == 2
+
+
+def test_opname_torch_special():
+    assert opname("torch.special.bessel_j0(v1)") == "bessel_j0"
+    assert opname("torch.special.bessel_j1(v1)") == "bessel_j1"
+
+
+def test_zero_shape_has_zero_numel_and_reaches_trailing_and_repeated_zeros():
+    gen = Gen(4, random.Random(2))
+    shapes = [eval(gen.zero_shape(src)) for src in ([4, 0], [0], [3, 0], [0, 7, 4, 4]) for _ in range(200)]
+    assert all(0 in s and 1 <= len(s) <= 6 for s in shapes)
+    assert any(s.count(0) >= 2 for s in shapes)
+    # zero dims after the source's own dims, as in (4, 0) -> (4, 2, 0, 0, 0)
+    assert any(len(s) >= 3 and s[-1] == 0 and s[-2] == 0 for s in shapes)
+    assert any(s[0] == 0 and any(d > 1 for d in s[1:]) for s in shapes)
+    for s in shapes:
+        assert torch.empty(4, 0).reshape(s).shape == torch.Size(s)
+
+
+def test_gen_full_linalg_kinds_are_well_conditioned():
+    for kind in ("dd", "spd"):
+        for shape in ([3, 3], [2, 4, 4], [1, 1], [0, 2, 2]):
+            A = gen_full(dict(shape=shape, dtype="f64", seed=5, kind=kind))
+            assert torch.equal(A, A.round())
+            torch.linalg.inv(A)
+            if kind == "spd":
+                assert torch.equal(A, A.mT)
+                torch.linalg.cholesky(A)
+    # non-square shapes (after a shape mutation) fall back to plain integers
+    assert gen_full(dict(shape=[2, 3], dtype="f32", seed=5, kind="dd")).shape == (2, 3)
+
+
+LINALG_FAMILIES = {
+    "cross": r"linalg\.cross|torch\.cross",
+    "solve_triangular": r"solve_triangular|triangular_solve",
+    "solve": r"linalg\.solve\(|lu_solve|cholesky_solve|ldl_solve|ormqr",
+    "decomp": r"det|slogdet|qr|svdvals|inv|cholesky\(|eigvalsh|matrix_exp|pinv|lu_factor",
+}
+
+
+def test_linalg_ops_cover_every_family_and_evaluate():
+    gen = Gen(4, random.Random(4))
+    seen, ok = set(), 0
+    for shape in ([2, 3], [3, 3], [1, 4, 3], [5], [2, 1, 3, 2]):
+        for _ in range(40):
+            prog = dict(mesh="1d", inputs=[], steps=[], nv=0)
+            j = gen.new_input(prog, shape, "f32")
+            prog["steps"].append(dict(out=gen.fresh_name(prog), expr=f"mk({j})"))
+            env = gen.replay(prog)[0]
+            expr = gen.p_linalg(prog, env, ["v0"], "v0", env["v0"])
+            env = gen.replay(prog)[0]
+            out = eval(expr, env)
+            assert isinstance(out, torch.Tensor), expr
+            ok += 1
+            seen |= {f for f, pat in LINALG_FAMILIES.items() if re.search(pat, expr)}
+    assert seen == set(LINALG_FAMILIES) and ok == 200
+
+
+def test_cross_partner_broadcasts_a_size_one_dim():
+    # the shape that breaks linalg_cross_strategy: one operand has size 1 where the other has more
+    gen = Gen(4, random.Random(9))
+    hits = 0
+    for _ in range(200):
+        prog = dict(mesh="1d", inputs=[], steps=[], nv=0)
+        j = gen.new_input(prog, [1, 3], "f32")
+        prog["steps"].append(dict(out=gen.fresh_name(prog), expr=f"mk({j})"))
+        env = gen.replay(prog)[0]
+        expr = gen.cross_op(prog, env, "v0", env["v0"])
+        a, b = (env[n] for n in re.findall(r"\bv\d+\b", expr)[:2])
+        torch.broadcast_shapes(a.shape, b.shape)
+        nd = max(a.dim(), b.dim())
+        sa, sb = [1] * (nd - a.dim()) + list(a.shape), [1] * (nd - b.dim()) + list(b.shape)
+        hits += any((x == 1) != (y == 1) for x, y in zip(sa, sb))
+    assert hits > 20
+
+
+@pytest.mark.parametrize("dt", ["i64", "i32"])
+def test_matmul_takes_integer_inputs(dt):
+    gen = Gen(4, random.Random(1))
+    seen = set()
+    for shape in ([3], [2, 3], [2, 3, 4]):
+        for _ in range(60):
+            prog = dict(mesh="1d", inputs=[], steps=[], nv=0)
+            j = gen.new_input(prog, shape, dt)
+            prog["steps"].append(dict(out=gen.fresh_name(prog), expr=f"mk({j})"))
+            env = gen.replay(prog)[0]
+            expr = gen.p_matmul(prog, env, ["v0"], "v0", env["v0"])
+            env = gen.replay(prog)[0]
+            try:
+                out = eval(expr, env)
+            except RuntimeError:
+                continue  # e.g. a float beta with an integer input
+            assert not out.is_floating_point(), expr
+            seen.add(opname(expr))
+    assert {"baddbmm", "addbmm", "linear", "addmv", "addr"} <= seen, seen

@@ -174,8 +174,21 @@ class Gen:
         x = rng.choice(names[-5:] if rng.random() < 0.6 else names)
         t = env[x]
         cat = rng.choices(
-            ["unary", "binary", "reduce", "shape", "matmul", "index", "inplace", "redist", "loss", "nn", "compile"],
-            [12, 10, 12, 16, 6, 6, 7, 14, 3, 8, 2 if self.allow_compile else 0],
+            [
+                "unary",
+                "binary",
+                "reduce",
+                "shape",
+                "matmul",
+                "index",
+                "inplace",
+                "redist",
+                "loss",
+                "nn",
+                "linalg",
+                "compile",
+            ],
+            [12, 10, 12, 16, 7, 6, 8, 14, 4, 9, 6, 2 if self.allow_compile else 0],
         )[0]
         return getattr(self, "p_" + cat)(prog, env, names, x, t)
 
@@ -250,6 +263,75 @@ class Gen:
                 # no copysign/signbit: a Partial(sum) cannot keep the sign of a zero, so -0.0 vs +0.0 would be
                 # reported as a value mismatch
             ]
+            # the long tail, drawn at a fixed rate; domains kept valid (clamp, abs + 1, sigmoid) so most outputs
+            # are finite
+            bulk = [
+                "torch.acos({x}.clamp(-1, 1))",
+                "torch.asin({x}.clamp(-1, 1))",
+                "torch.atan({x})",
+                "torch.acosh({x}.abs() + 1)",
+                "torch.asinh({x})",
+                "torch.atanh({x}.clamp(-0.5, 0.5))",
+                "torch.cosh({x})",
+                "torch.sinh({x})",
+                "torch.tan({x})",
+                "{x}.ceil()",
+                "torch.deg2rad({x})",
+                "torch.rad2deg({x})",
+                "torch.erfc({x})",
+                "torch.erfinv({x}.clamp(-0.5, 0.5))",
+                "torch.exp2({x})",
+                "torch.log2({x}.abs() + 1)",
+                "torch.log10({x}.abs() + 1)",
+                "torch.lgamma({x}.abs() + 0.5)",
+                "torch.digamma({x}.abs() + 0.5)",
+                "torch.logit(torch.sigmoid({x}))",
+                "torch.rsqrt({x}.abs() + 1)",
+                "torch.sinc({x})",
+                "torch.i0({x})",
+                "F.mish({x})",
+                "F.selu({x})",
+                "F.celu({x})",
+                "F.hardshrink({x}, 1.5)",
+                "F.softshrink({x}, 1.5)",
+                "F.threshold({x}, 0.5, -2.0)",
+                "{x}.clamp_max(1)",
+                "{x}.clamp_min(0)",
+                "{x}.clip(-2, 2)",
+                "{x}.sgn()",
+                "torch.positive({x})",
+                "torch.isinf({x}.reciprocal())",
+                "torch.isposinf({x}.reciprocal())",
+                "torch.isneginf({x}.reciprocal())",
+                "torch.nan_to_num({x}.reciprocal(), posinf=9.0, neginf=-9.0)",
+                "torch.float_power({x}, 2)",
+                "2 - {x}",
+                "torch.true_divide({x}, 4)",
+                "torch.frexp({x})[0]",
+                "torch.special.i0e({x})",
+                "torch.special.i1({x})",
+                "torch.special.i1e({x})",
+                "torch.special.erfcx({x})",
+                "torch.special.ndtri(torch.sigmoid({x}))",
+                "torch.special.log_ndtr({x})",
+                "torch.special.entr({x}.abs())",
+                "torch.special.bessel_j0({x})",
+                "torch.special.bessel_j1({x})",
+                "torch.special.chebyshev_polynomial_t({x}.clamp(-1, 1), 3)",
+                "torch.special.hermite_polynomial_h({x}, 2)",
+                "torch.special.legendre_polynomial_p({x}.clamp(-1, 1), 2)",
+                "torch.special.modified_bessel_i0({x})",
+                "torch.special.spherical_bessel_j0({x})",
+                "torch.special.zeta({x}.abs() + 2, 1.0)",
+                "torch.mvlgamma({x}.abs() + 2, 1)",
+                "torch.polygamma(1, {x}.abs() + 1)",
+                "{x}.new_full((2, 3), 7)",
+                "{x}.new_ones(({n},))".replace("{n}", str(r.randint(0, 5))),
+                "torch.fill({x}, 2)",
+                "torch.histc({x}.float(), bins=4, min=-4, max=4)",
+            ]
+            if r.random() < 0.4:
+                ops = bulk
         else:
             ops = [
                 "-{x}",
@@ -267,6 +349,17 @@ class Gen:
                 "torch.bitwise_left_shift({x}, 1)",
                 "{x}.clone()",
                 "{x}.sign()",
+                "{x} ^ 3",
+                "{x} | 1",
+                "~{x}",
+                "{x} << 1",
+                "{x} >> 1",
+                "torch.bitwise_right_shift({x}, 1)",
+                "torch.gcd({x}, {x} + 6)",
+                "torch.lcm({x}, {x}.abs() % 3 + 1)",
+                "torch.remainder({x}, 3)",
+                "{x}.clamp_min(0)",
+                "{x}.clamp_max(1)",
             ]
         return r.choice(ops).format(x=x)
 
@@ -309,6 +402,22 @@ class Gen:
             "torch.logaddexp({a}.float(), {b}.float())",
             "torch.xlogy({a}.float().abs(), {b}.float().abs())",
             "torch.heaviside({a}.float(), {b}.float())",
+            "{a} != {b}",
+            "{a} >= {b}",
+            "{a} > {b}",
+            "{a} <= {b}",
+            "torch.logical_xor({a}, {b})",
+            "{a}.bool() | {b}.bool()",
+            "{a}.bool() ^ {b}.bool()",
+            "torch.fmin({a}.float(), {b}.float())",
+            "torch.logaddexp2({a}.float(), {b}.float())",
+            "torch.nextafter({a}.float(), {b}.float())",
+            "torch.float_power({a}, {b}.abs() % 3)",
+            "torch.addcmul({a}, {a}, {b}, value=2)",
+            "torch.addcdiv({a}.float(), {b}.float(), {b}.float().abs() + 1)",
+            "torch.special.xlog1py({a}.float(), {b}.float().abs())",
+            "torch.ldexp({a}.float(), {b}.abs().clamp(max=4).int())",
+            "torch.remainder({a}, {b}.abs() + 1)",
         ]
         a, b = (x, y) if r.random() < 0.8 else (y, x)
         return r.choice(ops).format(a=a, b=b)
@@ -362,7 +471,13 @@ class Gen:
                 "{x}.cumprod(dim={d})",
                 "torch.linalg.vector_norm({x}, ord=float('inf'), dim={d})",
                 "{x}.mean(dim=({d}, {d2}))",
+                "torch.norm({x}, p=2, dim={d})",
+                "{x}.nanmedian(dim={d})[0]",
+                "{x}.nanmedian()",
+                "torch.linalg.norm({x})",
             ]
+            if 1 <= t.dim() <= 2:
+                ops.append("torch.cov({x})")
             if t.dim() >= 1:
                 ops += ["F.layer_norm({x}, [{last}])", "F.rms_norm({x}, [{last}])"]
         size = t.shape[d] if t.dim() else 1
@@ -426,11 +541,20 @@ class Gen:
             ]
             n = t.numel()
             ops += [
-                f"{x}.reshape({self.factor(n)})",
-                f"{x}.view({self.factor(n)})",
+                f"{x}.reshape({self.factor(n, shp)})",
+                f"{x}.view({self.factor(n, shp)})",
                 f"{x}.reshape(-1)",
                 f"{x}.view(-1)",
+                f"torch.broadcast_to({x}, ({', '.join(str(s if s != 1 else r.choice([1, 2, 3])) for s in shp)}))",
+                f"torch.tensor_split({x}, {r.randint(1, 4)}, dim={d})[0]",
             ]
+            if n == 0:
+                # zero-size views take their own path through view_groups (two hangs so far), so draw them more often
+                ops += [f"{x}.{r.choice(['reshape', 'view'])}({self.factor(0, shp)})" for _ in range(4)]
+                if sz == 0:
+                    zs = [r.choice([0, 0, 1, 2, 3]) for _ in range(r.randint(1, 4))]
+                    zs[r.randrange(len(zs))] = 0
+                    ops.append(f"{x}.unflatten({d}, ({', '.join(map(str, zs))}{',' if len(zs) == 1 else ''}))")
             if shp[d] in (4, 6, 8, 9, 12):
                 a = r.choice([f for f in (2, 3, 4) if shp[d] % f == 0] or [1])
                 ops.append(f"{x}.unflatten({d}, ({a}, {shp[d] // a}))")
@@ -438,10 +562,10 @@ class Gen:
             ops += [f"{x}.unsqueeze(0)", f"{x}.reshape(1, 1)", f"{x}.view(-1)", f"{x}.expand(3)", f"{x}[None]"]
         return r.choice(ops)
 
-    def factor(self, n):
+    def factor(self, n, src=()):
         r = self.rng
         if n == 0:
-            return r.choice(["(0,)", "(0, 3)", "(2, 0)"])
+            return self.zero_shape(src)
         fs = []
         m = n
         while m > 1 and len(fs) < 3:
@@ -457,6 +581,29 @@ class Gen:
         if not fs:
             fs = [1]
         return "(" + ", ".join(map(str, fs)) + ("," if len(fs) == 1 else "") + ")"
+
+    def zero_shape(self, src):
+        """A target shape with numel 0 for reshaping a zero-size tensor of shape src: several zero dims, zero dims
+        after the source's dims ((4, 0) -> (4, 2, 0, 0, 0)), or a zero followed by larger dims ((0,) -> (0, 5))."""
+        r = self.rng
+        c = r.random()
+        if c < 0.2:
+            return r.choice(["(0,)", "(0, 3)", "(2, 0)"])
+        if c < 0.55 and src:
+            # keep a prefix of the source shape, then a tail that contains a zero
+            head = list(src[: r.randint(0, len(src))])
+            tail = [r.choice([0, 0, 1, 2, 3, 5]) for _ in range(r.randint(1, 4))]
+            if 0 not in head + tail:
+                tail[r.randrange(len(tail))] = 0
+            dims = head + tail
+        else:
+            dims = [r.choice([0, 0, 1, 2, 3, 4, 5, 7]) for _ in range(r.randint(1, 5))]
+            if 0 not in dims:
+                dims[r.randrange(len(dims))] = 0
+        dims = dims[:6]
+        if 0 not in dims:
+            dims[-1] = 0
+        return "(" + ", ".join(map(str, dims)) + ("," if len(dims) == 1 else "") + ")"
 
     def partner(self, prog, env, shape, dtype, **kw):
         j = self.new_input(prog, shape, dtype, **kw)
@@ -478,28 +625,32 @@ class Gen:
 
     def p_matmul(self, prog, env, names, x, t):
         r = self.rng
-        if not t.is_floating_point() or t.dim() == 0 or t.dtype == torch.float16:
+        # int64/int32 too: CPU matmul kernels take them, and integer Partial(sum) outputs have their own bugs
+        if t.dtype in (torch.bool, torch.float16) or t.dim() == 0:
             return None
         dt = self.dtcode(t)
         shp = list(t.shape)
         m = r.choice([1, 2, 3, 4, 5, 8])
+        ab = r.choice(["", ", beta=2, alpha=3", ", beta=0", ", beta=0.5, alpha=2"])
         if t.dim() == 1:
             y = self.partner(prog, env, [shp[0]] if r.random() < 0.5 else [shp[0], m], dt)
             ops = [f"{x} @ {y}", f"torch.matmul({x}, {y})", f"torch.outer({x}, {x})"]
             if env[y].dim() == 1:
                 ops.append(f"torch.dot({x}, {y})")
+                b = self.partner(prog, env, [shp[0], shp[0]] if r.random() < 0.7 else [1], dt)
+                ops.append(f"torch.addr({b}, {x}, {y}{ab})")
             return r.choice(ops)
         k = shp[-1]
         c = r.random()
-        if c < 0.5:
+        if c < 0.4:
             y = self.partner(prog, env, [k, m], dt)
-            ops = [f"{x} @ {y}", f"torch.matmul({x}, {y})"]
+            ops = [f"{x} @ {y}", f"torch.matmul({x}, {y})", f"torch.tensordot({x}, {y}, dims=1)"]
             if t.dim() == 2:
                 ops += [f"torch.mm({x}, {y})", f"torch.einsum('ij,jk->ik', {x}, {y})"]
                 b = self.partner(prog, env, [shp[0], m] if r.random() < 0.5 else [m], dt)
-                ops.append(f"torch.addmm({b}, {x}, {y})")
+                ops += [f"torch.addmm({b}, {x}, {y}{ab})", f"{b}.addmm_({x}, {y}{ab})"]
             return r.choice(ops)
-        if c < 0.8:
+        if c < 0.65:
             w = self.partner(prog, env, [m, k], dt)
             if r.random() < 0.5:
                 b = self.partner(prog, env, [m], dt)
@@ -507,10 +658,19 @@ class Gen:
             return f"F.linear({x}, {w})"
         if t.dim() == 3:
             y = self.partner(prog, env, [shp[0], k, m], dt)
-            return r.choice([f"torch.bmm({x}, {y})", f"{x} @ {y}", f"torch.einsum('bij,bjk->bik', {x}, {y})"])
+            ops = [f"torch.bmm({x}, {y})", f"{x} @ {y}", f"torch.einsum('bij,bjk->bik', {x}, {y})"]
+            bshape = r.choice([[shp[0], shp[1], m], [shp[1], m], [1, m], [m]])
+            b = self.partner(prog, env, bshape, dt)
+            ops += [f"torch.baddbmm({b}, {x}, {y}{ab})"]
+            if len(bshape) == 3:
+                ops.append(f"{b}.baddbmm_({x}, {y}{ab})")
+            b2 = self.partner(prog, env, [shp[1], m] if r.random() < 0.7 else [m], dt)
+            ops.append(f"torch.addbmm({b2}, {x}, {y}{ab})")
+            return r.choice(ops)
         if t.dim() == 2:
             y = self.partner(prog, env, [k], dt)
-            return f"torch.mv({x}, {y})"
+            b = self.partner(prog, env, [shp[0]] if r.random() < 0.7 else [1], dt)
+            return r.choice([f"torch.mv({x}, {y})", f"torch.addmv({b}, {x}, {y}{ab})"])
         return f"{x} @ {x}.transpose(-1, -2)"
 
     def p_index(self, prog, env, names, x, t):
@@ -529,7 +689,7 @@ class Gen:
             ishape = [min(s, r.randint(0, s)) if i != d else s for i, s in enumerate(ishape)]
             idx = self.idx_input(prog, env, ishape, sz)
             if r.random() < 0.5:
-                return f"torch.gather({x}, {d}, {idx})"
+                return r.choice([f"torch.gather({x}, {d}, {idx})", f"torch.take_along_dim({x}, {idx}, dim={d})"])
             src = self.partner(prog, env, ishape, self.dtcode(t))
             return r.choice(
                 [
@@ -546,13 +706,30 @@ class Gen:
             src_shape = list(t.shape)
             src_shape[d] = env[idx].shape[0]
             src = self.partner(prog, env, src_shape, self.dtcode(t))
-            return f"{x}.index_add({d}, {idx}, {src})"
+            return r.choice(
+                [
+                    f"{x}.index_add({d}, {idx}, {src})",
+                    f"{x}.index_reduce({d}, {idx}, {src}, '{r.choice(['prod', 'amax', 'amin', 'mean'])}')",
+                    f"{x}.index_reduce_({d}, {idx}, {src}, 'amax', include_self=False)",
+                ]
+            )
         if c < 0.8:
             return r.choice([f"{x}.masked_select({x} > 0)", f"{x}.nonzero()", f"{x}[{x} > 0]"])
         if c < 0.9:
             idx = self.idx_input(prog, env, rand_shape(r, 1), max(1, r.randint(1, 6)))
             return f"F.one_hot({idx}, {max(1, env[idx].max().item() + 1) if env[idx].numel() else 3})"
-        return f"{x}.index_fill({d}, {self.idx_input(prog, env, [r.randint(0, 3)], sz)}, 7)"
+        if c < 0.95:
+            idx = self.idx_input(prog, env, [r.randint(0, 4)], t.shape[0])
+            v = self.partner(prog, env, [env[idx].shape[0], *t.shape[1:]] if r.random() < 0.5 else [], self.dtcode(t))
+            return r.choice(
+                [
+                    f"{x}.index_put(({idx},), {v})",
+                    f"{x}.index_put(({idx},), {v}, accumulate=True)",
+                    f"{x}.index_put_(({idx},), {v}, accumulate=True)",
+                ]
+            )
+        fi = self.idx_input(prog, env, [r.randint(0, 3)], sz)
+        return r.choice([f"{x}.index_fill({d}, {fi}, 7)", f"{x}.index_fill_({d}, {fi}, 1)"])
 
     def idx_input(self, prog, env, shape, high):
         return self.partner(
@@ -571,13 +748,70 @@ class Gen:
         same = [n for n in names if tuple(env[n].shape) == tuple(t.shape) and n != x]
         y = r.choice(same) if same else None
         nd = t.dim()
+        bulk = []
         ops = [f"{x}.mul_(2)", f"{x}.zero_()", f"{x}.fill_(3)", f"{x}.add_(1)", f"{x}.masked_fill_({x} > 0, 1)"]
         if t.is_floating_point() or t.dtype in (torch.int64, torch.int32):
             ops += [f"{x}.clamp_(min=0)", f"{x}.neg_()", f"{x}.abs_()"]
+        if t.dtype in (torch.int64, torch.int32):
+            ops += [
+                f"{x}.bitwise_not_()",
+                f"{x}.bitwise_or_(1)",
+                f"{x}.bitwise_xor_(3)",
+                f"{x}.bitwise_left_shift_(1)",
+                f"{x}.bitwise_right_shift_(1)",
+                f"{x}.remainder_(3)",
+                f"{x}.fmod_(3)",
+                f"{x}.gcd_({x} + 6)",
+                f"{x}.lcm_({x}.abs() % 3 + 1)",
+                f"{x}.clamp_min_(0)",
+                f"{x}.clamp_max_(1)",
+            ]
+        if t.dtype == torch.bool:
+            ops += [f"{x}.logical_not_()", f"{x}.logical_xor_({x}.logical_not())", f"{x}.bitwise_not_()"]
         if t.is_floating_point():
             ops += [f"{x}.relu_()", f"{x}.div_(2)", f"{x}.sigmoid_()"]
+            # one in-place call per step, so opname() names it; out-of-domain inputs give NaN on both sides
+            bulk = [
+                f"{x}.{op}()"
+                for op in (
+                    "sqrt_ exp_ log_ log1p_ log2_ log10_ rsqrt_ sin_ cos_ tan_ sinh_ cosh_ tanh_ atan_ asinh_ asin_ "
+                    "acos_ atanh_ acosh_ erf_ erfc_ erfinv_ expm1_ exp2_ lgamma_ digamma_ floor_ ceil_ round_ trunc_ "
+                    "frac_ sign_ sgn_ reciprocal_ square_ deg2rad_ rad2deg_ sinc_ i0_ logit_ nan_to_num_ detach_"
+                ).split()
+            ]
+            bulk += [f"{x}.pow_(2)", f"{x}.clamp_min_(0)", f"{x}.clamp_max_(1)", f"{x}.clip_(-1, 1)"]
+            bulk += [f"{x}.true_divide_(4)", f"{x}.fmod_(3)", f"{x}.remainder_(3)"]
+            if nd >= 2:
+                bulk += [f"{x}.tril_()", f"{x}.triu_(1)"]
+            bulk += [
+                f"F.hardtanh({x}, inplace=True)",
+                f"F.relu6({x}, inplace=True)",
+                f"F.leaky_relu_({x}, 0.25)",
+                f"F.elu_({x})",
+                f"F.celu({x}, inplace=True)",
+                f"F.selu({x}, inplace=True)",
+                f"F.silu({x}, inplace=True)",
+                f"F.mish({x}, inplace=True)",
+                f"F.hardsigmoid({x}, inplace=True)",
+                f"F.threshold_({x}, 0.5, -2.0)",
+            ]
+            if nd >= 1:
+                ops.append(f"{x}.cumprod_({r.randrange(nd)})")
         if y:
             ops += [f"{x}.add_({y})", f"{x}.copy_({y})", f"{x}.mul_({y})", f"{x}.sub_({y}, alpha=2)"]
+            ops += [f"{x}.{op}_({y})" for op in ("eq", "ne", "ge", "gt", "le", "lt")]
+            if t.is_floating_point():
+                ops += [
+                    f"{x}.lerp_({y}, 0.5)",
+                    f"{x}.atan2_({y})",
+                    f"{x}.hypot_({y})",
+                    f"{x}.heaviside_({y})",
+                    f"{x}.xlogy_({y})",
+                    f"{x}.addcmul_({y}, {y}, value=0.5)",
+                    f"{x}.addcdiv_({y}, {y})",
+                    f"{x}.nextafter_({y})",
+                    f"{x}.float_power_(2)",
+                ]
         if nd >= 1 and t.shape[0] > 0:
             i = r.randrange(t.shape[0])
             ops += [f"SETITEM({x}, {i}, 5)", f"SETITEM({x}, slice(0, {i + 1}), 0)"]
@@ -588,7 +822,8 @@ class Gen:
                 f"{x}.unsqueeze_(0)",
                 f"{x}.cumsum_({r.randrange(nd)})" if t.dtype != torch.bool else f"{x}.zero_()",
             ]
-        return r.choice(ops)
+        # the long tail of pointwise in-place ops is drawn at a fixed rate so it does not crowd out the rest
+        return r.choice(bulk if bulk and r.random() < 0.4 else ops)
 
     def p_redist(self, prog, env, names, x, t):
         pl = rand_placements(self.rng, prog["mesh"], t.dim(), self.dtcode(t))
@@ -598,25 +833,62 @@ class Gen:
         r = self.rng
         if not t.is_floating_point() or t.dtype in (torch.float16, torch.bfloat16):
             return None
-        if t.dim() == 2 and t.shape[1] > 0:
+        red = r.choice(["mean", "mean", "sum", "none"])
+        if t.dim() == 2 and t.shape[1] > 0 and r.random() < 0.5:
             tgt = self.idx_input(prog, env, [t.shape[0]], t.shape[1])
-            return r.choice(
-                [
-                    f"F.cross_entropy({x}, {tgt})",
-                    f"F.nll_loss(torch.log_softmax({x}, -1), {tgt})",
-                    f"F.cross_entropy({x}, {tgt}, reduction='sum')",
-                    f"F.cross_entropy({x}, {tgt}, reduction='none')",
-                ]
-            )
-        y = self.partner(prog, env, list(t.shape), self.dtcode(t))
-        return r.choice(
-            [
-                f"F.mse_loss({x}, {y})",
-                f"F.l1_loss({x}, {y}, reduction='sum')",
-                f"F.binary_cross_entropy_with_logits({x}, torch.sigmoid({y}))",
-                f"F.smooth_l1_loss({x}, {y})",
+            ops = [
+                f"F.cross_entropy({x}, {tgt})",
+                f"F.nll_loss(torch.log_softmax({x}, -1), {tgt})",
+                f"F.cross_entropy({x}, {tgt}, reduction='sum')",
+                f"F.cross_entropy({x}, {tgt}, reduction='none')",
+                f"F.cross_entropy({x}, {tgt}, label_smoothing=0.1, reduction='{red}')",
+                f"F.cross_entropy({x}, torch.softmax({x} * 0.5, -1), reduction='{red}')",
+                f"F.multi_margin_loss({x}, {tgt}, reduction='{red}')",
+                f"F.multilabel_soft_margin_loss({x}, ({x} > 0).to({x}.dtype), reduction='{red}')",
             ]
-        )
+            if r.random() < 0.3:
+                w = self.partner(prog, env, [t.shape[1]], self.dtcode(t))
+                ops += [
+                    f"F.cross_entropy({x}, {tgt}, weight={w}.abs() + 1, reduction='{red}')",
+                    f"F.nll_loss(torch.log_softmax({x}, -1), {tgt}, weight={w}.abs() + 1, reduction='{red}')",
+                ]
+            return r.choice(ops)
+        if t.dim() == 4 and t.shape[1] > 0 and r.random() < 0.5:
+            # (N, C, H, W) with an (N, H, W) target: nll_loss2d
+            tgt = self.idx_input(prog, env, [t.shape[0], t.shape[2], t.shape[3]], t.shape[1])
+            return f"F.cross_entropy({x}, {tgt}, reduction='{red}')"
+        y = self.partner(prog, env, list(t.shape), self.dtcode(t))
+        ops = [
+            f"F.mse_loss({x}, {y})",
+            f"F.l1_loss({x}, {y}, reduction='sum')",
+            f"F.binary_cross_entropy_with_logits({x}, torch.sigmoid({y}))",
+            f"F.smooth_l1_loss({x}, {y})",
+            f"F.mse_loss({x}, {y}, reduction='{red}')",
+            f"F.l1_loss({x}, {y}, reduction='{red}')",
+            f"F.huber_loss({x}, {y}, delta={r.choice([0.5, 1.0, 2.0])}, reduction='{red}')",
+            f"F.smooth_l1_loss({x}, {y}, beta=0.5, reduction='{red}')",
+            f"F.binary_cross_entropy(torch.sigmoid({x}), torch.sigmoid({y}), reduction='{red}')",
+            f"F.binary_cross_entropy(torch.sigmoid({x}), ({y} > 0).to({x}.dtype), reduction='{red}')",
+            f"F.binary_cross_entropy_with_logits({x}, ({y} > 0).to({x}.dtype), reduction='{red}')",
+            f"F.soft_margin_loss({x}, {y}.sign(), reduction='{red}')",
+            f"F.hinge_embedding_loss({x}, ({y} > 0).to({x}.dtype) * 2 - 1, reduction='{red}')",
+            f"F.poisson_nll_loss({x}, {y}.abs(), reduction='{red}')",
+            f"F.kl_div(torch.log_softmax({x}, -1), torch.log_softmax({y}, -1), log_target=True, reduction='{red}')",
+            f"F.kl_div(torch.log_softmax({x}, -1), torch.softmax({y}, -1), reduction='batchmean')",
+            f"F.gaussian_nll_loss({x}, {y}, {y}.abs() + 1, reduction='{red}')",
+            f"F.margin_ranking_loss({x}, {y}, ({x} > {y}).to({x}.dtype) * 2 - 1, reduction='{red}')",
+        ]
+        if t.dim() == 1:
+            ops.append(f"F.binary_cross_entropy_with_logits({x}, torch.sigmoid({y}), pos_weight={y}.abs() + 1)")
+        if t.dim() == 2:
+            ops += [
+                f"F.cosine_embedding_loss({x}, {y}, ({y}.sum(-1) > 0).to({x}.dtype) * 2 - 1, reduction='{red}')",
+                f"F.triplet_margin_loss({x}, {y}, {x} * 0.5, reduction='{red}')",
+                f"F.multilabel_margin_loss({x}, ({y}.abs() % {t.shape[1] + 1} - 1).long(), reduction='{red}')"
+                if t.shape[1] > 0
+                else f"F.mse_loss({x}, {y})",
+            ]
+        return r.choice(ops)
 
     def p_nn(self, prog, env, names, x, t):
         """Ops with their own sharding strategies: foreach lists, norms, conv, pooling, padding, interpolation,
@@ -632,7 +904,10 @@ class Gen:
         if fl and nd >= 1:
             groups.append("float")
         if fl and nd == 3:
-            groups.append("seq")
+            # twice: 3-D floats also take "img" (lifted to 4-D), which should not halve conv1d and 1-D upsampling
+            groups += ["seq", "seq"]
+        if fl and 2 <= nd <= 4:
+            groups.append("img")
         if not groups:
             return None
         g = r.choice(groups)
@@ -663,14 +938,49 @@ class Gen:
                 f"torch._foreach_add([{x}, {y}], [{y}, {x}])[{k}]",
                 f"torch._foreach_mul([{x}, {y}], 2)[{k}]",
                 f"torch._foreach_maximum([{x}, {y}], [{y}, {x}])[{k}]",
+                f"torch._foreach_minimum([{x}, {y}], [{y}, {x}])[{k}]",
+                f"torch._foreach_sub([{x}, {y}], [{y}, {x}])[{k}]",
+                f"torch._foreach_abs([{x}, {y}])[{k}]",
+                f"torch._foreach_neg([{x}, {y}])[{k}]",
+                f"torch._foreach_clone([{x}, {y}])[{k}]",
+                f"torch._foreach_sign([{x}, {y}])[{k}]",
+                f"torch._foreach_clamp_min([{x}, {y}], 0)[{k}]",
+                f"torch._foreach_clamp_max([{x}, {y}], 1)[{k}]",
             ]
+            un = r.choice(
+                "abs acos asin atan ceil cos cosh erf erfc exp expm1 floor frac lgamma log log10 log1p log2 neg "
+                "reciprocal round rsqrt sigmoid sign sin sinh sqrt tan tanh trunc".split()
+            )
             if fl:
                 ops += [
                     f"torch._foreach_norm([{x}, {y}])[{k}]",
+                    f"torch._foreach_norm([{x}, {y}], ord=float('inf'))[{k}]",
                     f"torch._foreach_lerp([{x}, {y}], [{y}, {x}], 0.5)[{k}]",
                     f"torch._foreach_addcmul([{x}, {y}], [{y}, {x}], [{x}, {y}], value=0.5)[{k}]",
+                    f"torch._foreach_addcdiv([{x}, {y}], [{y}, {x}], [{x}.abs() + 1, {y}.abs() + 1])[{k}]",
+                    f"torch._foreach_div([{x}, {y}], [{y}.abs() + 1, {x}.abs() + 1])[{k}]",
+                    f"torch._foreach_pow([{x}, {y}], 2)[{k}]",
                     f"torch._foreach_sqrt([{x}.abs(), {y}.abs()])[{k}]",
+                    f"torch._foreach_max([{x}, {y}])[{k}]",
+                    f"torch._foreach_{un}([{x}, {y}])[{k}]",
                 ]
+            if y != x:
+                # in place on both list members (returns the list in torch 2.14). Only for two distinct tensors, and
+                # the other lists are clones: with aliasing the result depends on the kernel's update order (the
+                # CPU loop and DTensor's foreach differ), which is not a DTensor bug
+                b_op = r.choice(["add_", "mul_", "sub_", "maximum_", "clamp_min_"])
+                u_op = r.choice(["abs_", "neg_", "zero_", "sign_"])
+                ops += [f"torch._foreach_{b_op}([{x}, {y}], 1)[{k}]", f"torch._foreach_{u_op}([{x}, {y}])[{k}]"]
+                if fl:
+                    yc, xc = f"{y}.clone()", f"{x}.clone()"
+                    ops += [
+                        f"torch._foreach_{un}_([{x}, {y}])[{k}]",
+                        f"torch._foreach_lerp_([{x}, {y}], [{yc}, {xc}], 0.5)[{k}]",
+                        f"torch._foreach_addcmul_([{x}, {y}], [{yc}, {xc}], [{xc}, {yc}], value=0.5)[{k}]",
+                        f"torch._foreach_addcdiv_([{x}, {y}], [{yc}, {xc}], [{x}.abs() + 1, {y}.abs() + 1])[{k}]",
+                        f"torch._foreach_div_([{x}, {y}], 2)[{k}]",
+                        f"torch._foreach_pow_([{x}, {y}], 2)[{k}]",
+                    ]
             return r.choice(ops)
         if g == "float":
             ops = [f"torch.logcumsumexp({x}, dim={d})", f"torch.var_mean({x}, dim={d})[0]"]
@@ -679,6 +989,10 @@ class Gen:
             if nd == 2:
                 ops += [f"torch.diag({x})", f"torch.diagonal_scatter({x}, torch.diagonal({x}) + 1)"]
             return r.choice(ops)
+        if g == "img":
+            # lower-rank inputs are lifted to (N, C, H, W) inside the expression
+            lift = "[None]" * (4 - nd)
+            return self.img_op(prog, env, f"{x}{lift}", t[(None,) * (4 - nd)])
         # "seq": (batch, channels, length)
         c = t.shape[1]
         if c and r.random() < 0.2:
@@ -689,11 +1003,185 @@ class Gen:
             f"F.max_pool1d({x}, {r.choice([1, 2])})",
             f"F.interpolate({x}, scale_factor=2, mode='nearest')",
             f"F.interpolate({x}, size={r.choice([2, 4, 5])}, mode='linear')",
+            f"F.interpolate({x}, scale_factor=2, mode='nearest-exact')",
+            f"F.adaptive_avg_pool1d({x}, {r.choice([1, 2, 3])})",
+            f"F.adaptive_max_pool1d({x}, {r.choice([1, 2, 3])})",
+            f"F.max_pool1d({x}, 2, return_indices=True)[1]",
+            f"F.instance_norm({x})",
         ]
         if c:
             ops += [
                 f"F.group_norm({x}, {r.choice([n for n in (1, 2, 3) if c % n == 0])})",
                 f"F.batch_norm({x}, None, None, training=True)",
+            ]
+        return r.choice(ops)
+
+    def img_op(self, prog, env, x, t):
+        """(N, C, H, W) inputs: 2-D pooling, upsampling, pixel shuffle, grid_sample; 3-D ops on the same tensor read
+        as an unbatched (C, D, H, W) volume or batched through x[None]."""
+        r = self.rng
+        n, c, h, w = t.shape
+        sz = r.choice([1, 2, 3])
+        mode = r.choice(["nearest", "nearest-exact", "bilinear", "bicubic"])
+        ops = [
+            f"F.adaptive_avg_pool2d({x}, {sz})",
+            f"F.adaptive_max_pool2d({x}, {sz})",
+            f"F.adaptive_max_pool2d({x}, {sz}, return_indices=True)[1]",
+            f"F.avg_pool2d({x}, {r.choice([1, 2])})",
+            f"F.max_pool2d({x}, {r.choice([1, 2])})",
+            f"F.lp_pool2d({x}, 2, {r.choice([1, 2])})",
+            f"F.interpolate({x}, scale_factor=2, mode='{mode}')",
+            f"F.interpolate({x}, size=({r.choice([2, 3, 5])}, {r.choice([2, 4])}), mode='bilinear', antialias=True)",
+            f"F.interpolate({x}, size=(2, 3), mode='bicubic', antialias=True)",
+            f"F.interpolate({x}, scale_factor=0.5, mode='area')",
+            f"F.adaptive_avg_pool3d({x}, {sz})",
+            f"F.max_pool3d({x}, 1)",
+            f"F.avg_pool3d({x}, 1)",
+            f"F.adaptive_max_pool3d({x}, {sz})",
+            f"F.interpolate({x}[None], scale_factor=2, mode='{r.choice(['nearest', 'trilinear', 'nearest-exact'])}')",
+            f"F.instance_norm({x})",
+        ]
+        if c % 4 == 0 and c:
+            ops.append(f"F.pixel_shuffle({x}, 2)")
+        if h % 2 == 0 and w % 2 == 0:
+            ops.append(f"F.pixel_unshuffle({x}, 2)")
+            ops.append(f"F.max_unpool2d(*F.max_pool2d({x}, 2, return_indices=True), 2)")
+        if r.random() < 0.15:
+            grid = self.partner(prog, env, [n, r.choice([1, 2, 3]), r.choice([1, 2, 3]), 2], self.dtcode(t))
+            gmode = r.choice(["bilinear", "nearest", "bicubic"])
+            ops.append(f"F.grid_sample({x}, torch.tanh({grid}), mode='{gmode}', align_corners=False)")
+        if c and r.random() < 0.15:
+            wt = self.partner(prog, env, [r.choice([1, 2]), c, 1, r.choice([1, 2])], self.dtcode(t))
+            ops.append(f"F.conv2d({x}, {wt})")
+        return r.choice(ops)
+
+    def bcast_like(self, shp, keep=(), drop_max=None):
+        """A shape that broadcasts with shp: dims in keep (negative indices) are copied, a size-s dim becomes s or 1,
+        a size-1 dim becomes 1 or a larger size (the other operand is then the broadcast one), and up to drop_max
+        leading dims are dropped."""
+        r = self.rng
+        nd = len(shp)
+        out = []
+        for i, s in enumerate(shp):
+            if i - nd in keep:
+                out.append(s)
+            elif s == 1:
+                out.append(r.choice([1, 2, 3, 4, 5]))
+            else:
+                out.append(r.choice([s, 1]))
+        k = r.randint(0, nd if drop_max is None else min(drop_max, nd))
+        return out[k:]
+
+    def batch_dims(self):
+        r = self.rng
+        return [r.choice([1, 1, 2, 3, 4, 5, 0]) for _ in range(r.choice([0, 1, 1, 2]))]
+
+    def p_linalg(self, prog, env, names, x, t):
+        """Broadcasting cross products and batched linalg. Both have their own strategies (linalg_cross_strategy,
+        linalg_batch_dim_strategy) that shard batch dims, so operands get size-1 batch dims to broadcast."""
+        r = self.rng
+        if t.dtype not in (torch.float32, torch.float64):
+            return None
+        c = r.random()
+        if c < 0.3:
+            return self.cross_op(prog, env, x, t)
+        if c < 0.65:
+            return self.solve_op(prog, env, x, t)
+        return self.decomp_op(prog, env, x, t)
+
+    def cross_op(self, prog, env, x, t):
+        r = self.rng
+        dt = self.dtcode(t)
+        threes = [i - t.dim() for i, s in enumerate(t.shape) if s == 3]
+        if threes and r.random() < 0.6:
+            a, shp, d = x, list(t.shape), r.choice(threes)
+        else:
+            shp = [r.choice([1, 1, 2, 3, 4, 5, 0]) for _ in range(r.randint(0, 3))]
+            pos = r.randint(0, len(shp))
+            shp.insert(pos, 3)
+            d = pos - len(shp)
+            a = self.partner(prog, env, shp, dt)
+        op = r.choice(["torch.linalg.cross", "torch.linalg.cross", "torch.cross", "torch.linalg.vecdot"])
+        if r.random() < 0.15:
+            op = "F.cosine_similarity"
+        # cross needs equal ranks; the others also broadcast missing leading dims
+        b = self.partner(prog, env, self.bcast_like(shp, keep=(d,), drop_max=0 if "cross" in op else len(shp) + d), dt)
+        if r.random() < 0.5:
+            a, b = b, a
+        return f"{op}({a}, {b}, dim={d})"
+
+    def square(self, prog, env, batch, n, dt, kind):
+        return self.partner(prog, env, [*batch, n, n], dt, kind=kind, high=None)
+
+    def solve_op(self, prog, env, x, t):
+        """A (*a, n, n) and B (*b, n, k) with broadcasting batch dims. B is x when x is a matrix."""
+        r = self.rng
+        dt = self.dtcode(t)
+        if t.dim() >= 2 and r.random() < 0.6:
+            b, bshape = x, list(t.shape)
+        else:
+            bshape = [*self.batch_dims(), r.choice([1, 2, 3, 4]), r.choice([1, 2, 3])]
+            b = self.partner(prog, env, bshape, dt)
+        n = bshape[-2]
+        u = r.choice([True, False])
+        op = r.choice(["tri", "tri", "trs", "solve", "lu", "chol", "ldl", "ormqr"])
+        # ormqr needs equal batches; ldl_solve with a broadcast LD batch reads out of bounds on plain CPU tensors
+        # (wrong values or SIGSEGV in torch 2.14), which would kill the generator's own process
+        abatch = list(bshape[:-2]) if op in ("ldl", "ormqr") else self.bcast_like(bshape[:-2])
+        if op in ("tri", "trs", "ormqr"):
+            a = self.square(prog, env, abatch, n, dt, None)
+        else:
+            a = self.square(prog, env, abatch, n, dt, "spd" if op in ("chol", "ldl") else "dd")
+        if op == "tri" and r.random() < 0.3:
+            return f"torch.linalg.solve_triangular({a}, {b}.mT, upper={u}, left=False, unitriangular=True)"
+        return {
+            "tri": f"torch.linalg.solve_triangular({a}, {b}, upper={u}, unitriangular=True)",
+            "trs": f"torch.triangular_solve({b}, {a}, upper={u}, unitriangular=True)[0]",
+            "solve": f"torch.linalg.solve({a}, {b})",
+            "lu": f"torch.linalg.lu_solve(*torch.linalg.lu_factor({a}), {b})",
+            "chol": f"torch.cholesky_solve({b}, torch.linalg.cholesky({a}))",
+            "ldl": f"torch.linalg.ldl_solve(*torch.linalg.ldl_factor({a}), {b})",
+            "ormqr": f"torch.ormqr(*torch.geqrf({a}), {b}, left=True, transpose={u})",
+        }[op]
+
+    def decomp_op(self, prog, env, x, t):
+        """One square (batch of) matrices in, from x when x is square, else a fresh well-conditioned one."""
+        r = self.rng
+        dt = self.dtcode(t)
+        kind = r.choice(["dd", "spd"])
+        if t.dim() >= 2 and t.shape[-1] == t.shape[-2] and r.random() < 0.4:
+            a, kind = x, None
+        else:
+            a = self.square(prog, env, self.batch_dims(), r.choice([0, 1, 2, 3, 4]), dt, kind)
+        ops = [
+            f"torch.linalg.det({a})",
+            f"torch.linalg.slogdet({a})[1]",
+            f"torch.linalg.qr({a})[1]",
+            f"torch.geqrf({a})[0]",
+            f"torch.linalg.householder_product(*torch.geqrf({a}))",
+            f"torch.linalg.svdvals({a})",
+            f"torch.linalg.matrix_norm({a})",
+            f"torch.linalg.matrix_norm({a}, ord=1)",
+            f"torch.linalg.lu_factor({a})[0]",
+            f"torch.linalg.lu({a})[2]",
+            f"torch.lu_unpack(*torch.linalg.lu_factor({a}))[1]",
+            f"torch.linalg.matrix_exp({a} * 0.1)",
+            f"torch.linalg.pinv({a})",
+            f"{a}.diagonal(dim1=-2, dim2=-1).sum(-1)",
+        ]
+        if kind is not None:
+            ops += [
+                f"torch.linalg.inv({a})",
+                f"torch.linalg.inv_ex({a})[0]",
+                f"torch.linalg.solve_ex({a}, {a})[0]",
+            ]
+        if kind == "spd":
+            ops += [
+                f"torch.linalg.cholesky({a})",
+                f"torch.linalg.cholesky_ex({a})[0]",
+                f"torch.cholesky_inverse(torch.linalg.cholesky({a}))",
+                f"torch.linalg.eigvalsh({a})",
+                f"torch.linalg.ldl_factor({a})[0]",
             ]
         return r.choice(ops)
 
