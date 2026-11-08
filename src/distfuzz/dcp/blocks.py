@@ -219,11 +219,12 @@ def apply_ac(model, mode):
             return CheckpointPolicy.MUST_SAVE if op in save else CheckpointPolicy.PREFER_RECOMPUTE
 
         kw["context_fn"] = lambda: create_selective_checkpoint_contexts(policy)
-    for i in range(len(model.blocks)):
+    keys = list(model.blocks.keys()) if isinstance(model.blocks, nn.ModuleDict) else range(len(model.blocks))
+    for i in keys:
         model.blocks[i] = checkpoint_wrapper(model.blocks[i], preserve_rng_state=False, **kw)
 
 
-def clip_titan(params, max_norm, norm_type, foreach):
+def clip_titan(params, max_norm, norm_type, foreach, pp_group=None):
     # torchtitan distributed/utils.py clip_grad_norm_ without the pipeline branch: group grads by mesh,
     # get_total_norm per group, full_tensor() of DTensor norms, combine, clip_grads_with_norm_ per group
     from torch.distributed.tensor import DTensor
@@ -242,6 +243,15 @@ def clip_titan(params, max_norm, norm_type, foreach):
         total = torch.stack(norms).amax()
     else:
         total = sum(n**norm_type for n in norms) ** (1.0 / norm_type)
+    if pp_group is not None:  # reduce across pipeline stages (torchtitan pp_mesh branch)
+        import torch.distributed as dist
+
+        if math.isinf(norm_type):
+            dist.all_reduce(total, op=dist.ReduceOp.MAX, group=pp_group)
+        else:
+            total **= norm_type
+            dist.all_reduce(total, op=dist.ReduceOp.SUM, group=pp_group)
+            total **= 1.0 / norm_type
     for ps in by_mesh.values():
         torch.nn.utils.clip_grads_with_norm_(ps, max_norm, total, foreach)
     return total
@@ -264,13 +274,13 @@ def clip_accel(params, max_norm, norm_type, foreach):
     return total
 
 
-def clip_grads(params, c):
+def clip_grads(params, c, pp_group=None):
     """c: {"max", "norm", "foreach", "impl"}; returns the total norm as a float."""
     nt = float(c.get("norm", 2.0))
     fe = c.get("foreach")
     impl = c.get("impl", "torch")
-    if impl == "titan":
-        n = clip_titan(params, c["max"], nt, fe)
+    if impl == "titan" or pp_group is not None:
+        n = clip_titan(params, c["max"], nt, fe, pp_group)
     elif impl == "accel":
         n = clip_accel(params, c["max"], nt, fe)
     else:
@@ -311,8 +321,133 @@ def replicate_leftovers(model, mesh):
     """Apply no_parallel to every top-level unit (block, emb, head) that still holds plain parameters."""
     from torch.distributed.tensor import DTensor
 
-    units = list(model.blocks) + [m for m in (getattr(model, "emb", None), model.head) if m is not None]
+    blocks = model.blocks.values() if isinstance(model.blocks, nn.ModuleDict) else model.blocks
+    units = list(blocks) + [m for m in (getattr(model, "emb", None), getattr(model, "head", None)) if m is not None]
     for u in units:
         ps = list(u.parameters())
         if ps and not any(isinstance(p, DTensor) for p in ps):
             no_parallel(u, mesh)
+
+
+# torchtitan checkpoint containers (torchtitan@6062827 components/checkpointer/base.py:128-160 ModelWrapper,
+# components/optim/optimizer.py:491-510 OptimizersContainer, components/optim/utils.py:29-230): the model state is
+# the union of every model chunk's Module.state_dict(), loaded with load_state_dict(strict=False); the optimizer
+# state is a flat FQN-keyed view of Optimizer.state_dict() built from param_names, materialized by a zero-lr step.
+def _canon(k):
+    k = k.replace("_checkpoint_wrapped_module.", "").replace("_orig_mod.", "")
+    return k[len("module.") :] if k.startswith("module.") else k  # DDP wrapper
+
+
+def titan_init_optim_state(optim):
+    params = [p for g in optim.param_groups for p in g["params"]]
+    todo = [p for p in params if p.requires_grad and not optim.state.get(p)]
+    if not todo:
+        return
+    saved = [p.grad for p in params]
+    for p in params:
+        p.grad = None
+    for p in todo:
+        p.grad = torch.zeros_like(p)
+    lrs = []
+    for g in optim.param_groups:
+        if "lr" in g:
+            lrs.append(g["lr"])
+            g["lr"] = torch.tensor(0.0) if isinstance(g["lr"], torch.Tensor) else 0.0
+    optim.step(closure=None)
+    if isinstance(optim, (torch.optim.Adam, torch.optim.AdamW)):
+        for p in todo:
+            st = optim.state[p]
+            st["step"].zero_()
+            st["exp_avg"].zero_()
+            st["exp_avg_sq"].zero_()
+            if "max_exp_avg_sq" in st:
+                st["max_exp_avg_sq"].zero_()
+    for g in optim.param_groups:
+        if "lr" in g:
+            g["lr"] = lrs.pop(0)
+    for p, gr in zip(params, saved):
+        p.grad = gr
+
+
+def _flatten_nested(state, prefix, out):
+    for k, v in state.items():
+        fk = f"{prefix}.{k}"
+        if isinstance(v, dict):
+            _flatten_nested(v, fk, out)
+        else:
+            out[fk] = v
+
+
+def titan_flat_optim_sd(optim):
+    sd = optim.state_dict()
+    id2fqn, groups = {}, []
+    for g in sd["param_groups"]:
+        for pid, fqn in zip(g["params"], g["param_names"]):
+            id2fqn[pid] = fqn
+        ng = {k: v for k, v in g.items() if k not in ("param_names", "capturable")}
+        ng["params"] = list(g["param_names"])
+        groups.append(ng)
+    flat = {}
+    for pid, st in sd["state"].items():
+        _flatten_nested(st, f"state.{id2fqn[pid]}", flat)
+    for g in groups:
+        for fqn in g["params"]:
+            for k, v in g.items():
+                if k != "params":
+                    flat[f"param_groups.{fqn}.{k}"] = v
+    return flat
+
+
+def titan_load_flat_optim_sd(optim, flat):
+    state, groups, pid = {}, [], 0
+    for g in optim.param_groups:
+        fqns, ps, ids = g["param_names"], g["params"], []
+        for fqn, p in zip(fqns, ps):
+            ids.append(pid)
+            if p in optim.state:
+                ps_ = {n: flat[f"state.{fqn}.{n}"] for n in optim.state[p] if f"state.{fqn}.{n}" in flat}
+                if ps_:
+                    state[pid] = ps_
+            pid += 1
+        if not fqns:
+            groups.append({"params": ids})
+            continue
+        ng = {"params": ids}
+        for k in g:
+            if k in ("params", "param_names"):
+                continue
+            if k == "capturable":
+                ng[k] = g[k]
+                continue
+            ng[k] = flat[f"param_groups.{fqns[0]}.{k}"]
+        groups.append(ng)
+    optim.load_state_dict({"state": state, "param_groups": groups})
+
+
+class TitanModel:
+    def __init__(self, parts):
+        self.parts = parts
+
+    def state_dict(self):
+        return {_canon(k): v for m in self.parts for k, v in m.state_dict().items()}
+
+    def load_state_dict(self, sd):
+        for m in self.parts:
+            m.load_state_dict({k: sd[_canon(k)] for k in m.state_dict() if _canon(k) in sd}, strict=False)
+
+
+class TitanOptim:
+    def __init__(self, opts):
+        self.opts = opts
+
+    def state_dict(self):
+        out = {}
+        for o in self.opts:
+            titan_init_optim_state(o)
+            out.update(titan_flat_optim_sd(o))
+        return out
+
+    def load_state_dict(self, sd):
+        for o in self.opts:
+            titan_init_optim_state(o)
+            titan_load_flat_optim_sd(o, sd)

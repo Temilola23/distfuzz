@@ -12,7 +12,14 @@ import warnings
 
 TARGETS = [
     os.sep + os.path.join("torch", "distributed", d)
-    for d in ("checkpoint" + os.sep, "fsdp" + os.sep, "tensor" + os.sep, "_composable" + os.sep, "_state_dict_utils.py")
+    for d in (
+        "checkpoint" + os.sep,
+        "fsdp" + os.sep,
+        "tensor" + os.sep,
+        "_composable" + os.sep,
+        "_state_dict_utils.py",
+        "pipelining" + os.sep,
+    )
 ]
 TARGETS.append(os.sep + os.path.join("torch", "nn", "parallel") + os.sep)
 
@@ -22,6 +29,7 @@ def main():
     ap = argparse.ArgumentParser()
     for a in ("--rank", "--world", "--port", "--cov"):
         ap.add_argument(a, type=int, default=1)
+    ap.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
     args = ap.parse_args()
     faulthandler.register(signal.SIGUSR1, all_threads=True)
     proto = os.fdopen(os.dup(1), "w", buffering=1)
@@ -31,12 +39,13 @@ def main():
     import torch.distributed as dist
     from torch.distributed.device_mesh import init_device_mesh
 
+    from distfuzz.dcp import runtime
     from distfuzz.dcp.runtime import run_segment
 
     torch.set_num_threads(1)
 
     cov_new = set()
-    if args.cov:
+    if args.cov and hasattr(sys, "monitoring"):  # Python < 3.12 (some notebook images): run without coverage
         mon = sys.monitoring
         mon.use_tool_id(4, "dcpfuzz")
 
@@ -50,19 +59,34 @@ def main():
         mon.set_events(4, mon.events.LINE)
 
     W = args.world
+    D = args.device
+    dev_id = None
+    if D == "cuda":
+        dev_id = torch.device("cuda", args.rank % torch.cuda.device_count())
+        torch.cuda.set_device(dev_id)
+    pg_timeout = datetime.timedelta(seconds=int(os.environ.get("DCP_PG_TIMEOUT", 30)))
     dist.init_process_group(
-        "gloo",
+        "nccl" if D == "cuda" else "gloo",
         init_method=f"tcp://127.0.0.1:{args.port}",
         rank=args.rank,
         world_size=W,
-        timeout=datetime.timedelta(seconds=int(os.environ.get("DCP_PG_TIMEOUT", 30))),
+        timeout=pg_timeout,
+        **({"device_id": dev_id} if dev_id is not None else {}),
     )
-    meshes = {"1d": init_device_mesh("cpu", (W,))}
+    runtime.DEV["device"] = D
+    gloo = "gloo" if D == "cpu" else None  # no Gloo groups under NCCL (see runtime.DEV)
+    meshes = {"1d": init_device_mesh(D, (W,))}
     for a in range(1, W + 1):
         if W % a == 0:
-            meshes[f"2d:{a},{W // a}"] = init_device_mesh("cpu", (a, W // a), mesh_dim_names=("dp", "tp"))
-    meshes["_ep_pg"] = dist.new_group(backend="gloo")
-    rt = dict(rank=args.rank, world=W, meshes=meshes, ckpt_pg=dist.new_group(backend="gloo"))
+            meshes[f"2d:{a},{W // a}"] = init_device_mesh(D, (a, W // a), mesh_dim_names=("dp", "tp"))
+    for a in range(2, W + 1):  # pipeline meshes (pp, dp)
+        if W % a == 0:
+            meshes[f"pp:{a},{W // a}"] = init_device_mesh(D, (a, W // a), mesh_dim_names=("pp", "dp"))
+    from torch.distributed.device_mesh import DeviceMesh
+
+    meshes["_from_group"] = DeviceMesh.from_group(dist.new_group(), D)
+    meshes["_ep_pg"] = dist.new_group(backend=gloo)
+    rt = dict(rank=args.rank, world=W, meshes=meshes, ckpt_pg=dist.new_group(backend=gloo))
 
     proto.write(json.dumps({"ready": True, "rank": args.rank}) + "\n")
     for ln in sys.stdin:

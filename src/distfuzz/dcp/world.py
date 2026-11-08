@@ -51,9 +51,13 @@ def stack_location(txt):
     return " > ".join(x for x in (api, inner) if x)
 
 
+# NCCL: wait() raises after the group timeout instead of blocking forever (as in the collectives fuzzer)
+NCCL_ENV = {"TORCH_NCCL_BLOCKING_WAIT": "1", "TORCH_NCCL_ASYNC_ERROR_HANDLING": "1", "TORCH_NCCL_DUMP_ON_TIMEOUT": "0"}
+
+
 class World:
-    def __init__(self, n, logdir, cov=True, startup_timeout=90):
-        self.n, self.logdir, self.cov = n, logdir, cov
+    def __init__(self, n, logdir, cov=True, startup_timeout=90, device="cpu"):
+        self.n, self.logdir, self.cov, self.device = n, logdir, cov, device
         self.startup_timeout = startup_timeout
         self.procs = []
         self.restarts = 0
@@ -70,9 +74,18 @@ class World:
     def start(self):
         port = free_port()
         env = dict(os.environ, OMP_NUM_THREADS="1", PYTHONUNBUFFERED="1")
+        if self.device == "cuda":
+            env.update(NCCL_ENV)
         self.procs = []
         for r in range(self.n):
             log = open(os.path.join(self.logdir, f"rank{r}.log"), "a")
+            renv = dict(env)
+            if not os.environ.get("DISTFUZZ_SHARED_CACHE"):
+                # one inductor / AOTAutograd cache per rank: on CPU every rank hashes a DTensor input to the same key
+                # and loads another rank's graph (VERIFIED §53, known)
+                renv["TORCHINDUCTOR_CACHE_DIR"] = os.path.join(
+                    os.environ.get("TMPDIR", "/tmp"), f"distfuzz_inductor_w{self.n}_r{r}"
+                )
             p = subprocess.Popen(
                 [
                     sys.executable,
@@ -86,13 +99,15 @@ class World:
                     str(port),
                     "--cov",
                     str(int(self.cov)),
+                    "--device",
+                    self.device,
                 ],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=log,
                 text=True,
                 bufsize=1,
-                env=env,
+                env=renv,
             )
             self.procs.append(p)
         res = self._collect(self.startup_timeout)

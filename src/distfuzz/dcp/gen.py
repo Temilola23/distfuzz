@@ -230,7 +230,7 @@ class Gen:
                     if int(k) >= len(m["blocks"]):
                         return False
                     b = m["blocks"][int(k)]
-                    want = {"lin": ("col", "row"), "mlp": ("mlp",), "attn": ("attn",)}.get(b["t"], ())
+                    want = {"lin": ("col", "row"), "mlp": ("mlp",), "attn": ("attn",), "ln": ("sp",)}.get(b["t"], ())
                     if v not in want:
                         return False
                     if b["t"] == "attn" and b["nh"] % tpd:

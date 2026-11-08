@@ -16,8 +16,8 @@ CK_ROOT = os.environ.get("CK_ROOT") or tempfile.gettempdir()
 
 
 class Pools:
-    def __init__(self, logdir, cov=True, max_w=4):
-        self.logdir, self.cov = logdir, cov
+    def __init__(self, logdir, cov=True, max_w=4, device="cpu"):
+        self.logdir, self.cov, self.device = logdir, cov, device
         self.pools = {}
         self.max_w = max_w
         self.budget = int(os.environ.get("PROC_BUDGET", 7))
@@ -31,7 +31,7 @@ class Pools:
             old = next(iter(self.pools))
             self.pools.pop(old).close()
             self.evictions += 1
-        self.pools[w] = World(w, os.path.join(self.logdir, f"w{w}"), cov=self.cov)
+        self.pools[w] = World(w, os.path.join(self.logdir, f"w{w}"), cov=self.cov, device=self.device)
         return self.pools[w]
 
     @property
@@ -89,6 +89,8 @@ def run_scenario(pools, scn, workdir, timeout=120, tags=None):
     os.makedirs(workdir, exist_ok=True)
     findings, cov = [], set()
     tags = {} if tags is None else tags
+    if scn.get("compile"):
+        timeout *= 3  # first-call compilation of every block
     for si, seg in enumerate(scn["segs"]):
         tags.clear()  # tags describe the segment that produced the finding
         world = pools.get(seg["w"])
@@ -226,17 +228,28 @@ def main(argv):
     ap.add_argument("--timeout", type=float, default=120)
     ap.add_argument("--max-w", type=int, default=4)
     ap.add_argument("--profile", choices=["classic", "train"], default="classic")
+    ap.add_argument(
+        "--known-rate",
+        type=float,
+        default=1.0,
+        help="train profile: run a scenario the known-bug predictor flags with this probability (1 = no skipping)",
+    )
+    ap.add_argument("--device", choices=["cpu", "cuda"], default="cpu", help="cuda: workers run NCCL, one GPU per rank")
     a = ap.parse_args(argv)
+    from distfuzz.dcp import known
+
     os.makedirs(a.out, exist_ok=True)
     rng = random.Random(a.seed)
     gen = (TrainGen if a.profile == "train" else Gen)(rng, max_w=a.max_w)
-    pools = Pools(os.path.join(a.out, "logs"), max_w=a.max_w)
+    pools = Pools(os.path.join(a.out, "logs"), max_w=a.max_w, device=a.device)
     cov, corpus, sigs, kinds = set(), [], {}, {}
     fsig = open(os.path.join(a.out, "findings.jsonl"), "a")
     fstat = open(os.path.join(a.out, "stats.jsonl"), "a")
     t0 = time.time()
     end = t0 + a.minutes * 60
     execs = segs_total = steps_total = 0
+    # skip-seen accounting: useful = executed scenarios that ran clean or produced a finding not classified known
+    ks = dict(skipped=0, useful=0, known_execs=0, pred_run=0, pred_hit=0, unpred_known=0)
     last = 0
     pid = 0
     workdir = os.path.join(CK_ROOT, f"fz{a.seed}")
@@ -246,6 +259,10 @@ def main(argv):
             scn = gen.mutate(parent)
         else:
             scn = gen.generate()
+        pred = known.predict(scn) if a.profile == "train" else []
+        if pred and rng.random() >= a.known_rate:
+            ks["skipped"] += 1
+            continue
         pid += 1
         scn["id"] = pid
         tags = {}
@@ -258,16 +275,27 @@ def main(argv):
             cov |= added
             if a.mode == "guided" and not findings:
                 corpus.append(scn)
+        kn = []
         for f in findings:
             f["tags"] = dict(tags)
             s = signature(f, scn)
+            kn.append(known.classify(s, f, scn) if a.profile == "train" else None)
+            f["known"] = kn[-1]
             kinds[f["kind"]] = kinds.get(f["kind"], 0) + 1
             if s not in sigs:
                 sigs[s] = 0
-                fsig.write(json.dumps(dict(sig=s, finding=f, scn=scn, t=round(time.time() - t0, 1))) + "\n")
+                fsig.write(json.dumps(dict(sig=s, finding=f, scn=scn, pred=pred, t=round(time.time() - t0, 1))) + "\n")
                 fsig.flush()
                 print(f"[{time.time() - t0:7.1f}s] NEW {s}", flush=True)
             sigs[s] += 1
+        all_known = bool(kn) and all(kn)
+        ks["known_execs"] += all_known
+        ks["useful"] += not all_known
+        if pred:
+            ks["pred_run"] += 1
+            ks["pred_hit"] += any(kn)
+        elif any(kn):
+            ks["unpred_known"] += 1
         if time.time() - last > 30 or time.time() >= end:
             last = time.time()
             el = last - t0
@@ -282,6 +310,7 @@ def main(argv):
                 sigs=len(sigs),
                 restarts=pools.restarts,
                 kinds=kinds,
+                **ks,
             )
             fstat.write(json.dumps(st) + "\n")
             fstat.flush()
