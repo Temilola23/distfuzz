@@ -34,7 +34,7 @@ def opname(expr):
     if e.startswith("CMP("):
         m = re.search(r"lambda [^:]*: (.*?)['\"],", e)
         return "compile:" + (opname(m.group(1)) if m else "?")
-    m = re.match(r"^(torch\.(?:nn\.functional\.|linalg\.)?|F\.)(\w+)\(", e)
+    m = re.match(r"^(torch\.(?:nn\.functional\.|linalg\.|special\.)?|F\.)(\w+)\(", e)
     if m:
         return m.group(2)
     m = re.match(r"^v\d+((?:\.\w+(?:\([^()]*\))?)*?)\.(\w+)\(", e)
