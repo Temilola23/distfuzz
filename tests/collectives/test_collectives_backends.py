@@ -215,12 +215,95 @@ def test_fuzzer_cross_mode_tags_every_signature_and_records_the_disagreement(tmp
     fz.sess, fz.sess2, fz.t0 = FakeSession(bad), FakeSession(ok_run(VALID)), 0.0
     fz.execute(VALID)
     assert fz.sess.calls == fz.sess2.calls == 1
-    assert set(fz.findings) == {
-        "gloo:WRONG_RESULT|all_reduce|torch.int64",
-        "XBACKEND_VALUE|all_reduce|torch.int64|gloo!=gloo",
-    }
-    assert fz.stats["xbackend_checked"] == 1
+    # the per-backend oracle already reports the wrong value, so the disagreement is counted, not reported again
+    assert set(fz.findings) == {"gloo:WRONG_RESULT|all_reduce|torch.int64"}
+    assert fz.stats["xbackend_checked"] == 1 and fz.stats["xbackend_dup"] == 1
     fz.pool.shutdown()
+
+
+def test_cross_disagreement_explained_by_an_nccl_layout_rejection_is_not_reported(tmp_path):
+    fz = Fuzzer(str(tmp_path), mode="random", world=2, backend="nccl", cross="gloo", confirm_timeout=0)
+    fz.sess, fz.sess2, fz.t0 = FakeSession(reject_run(VALID)), FakeSession(ok_run(VALID)), 0.0
+    fz.execute(VALID)
+    assert fz.findings == {} and fz.stats["nccl_rejected"] == 1 and fz.stats["xbackend_dup"] == 1
+    fz.pool.shutdown()
+
+
+def reject_run(prog, kind="ok"):
+    res = raised_run(prog, "Tensors must be contiguous")
+    res["results"][0]["exc"]["type"] = "ValueError"
+    if kind == "hang":
+        res = dict(res, kind="hang", stuck_ranks=[1], results=[res["results"][0], None])
+    return res
+
+
+def test_nccl_layout_rejection_is_documented_behaviour_not_a_finding():
+    for kind in ("ok", "hang"):
+        fs, info = classify(VALID, reject_run(VALID, kind), backend="nccl")
+        assert fs == [] and info["nccl_rejected"] == 1
+    # Gloo has no such rule: the same raise stays a VALID_ERROR there
+    assert classify(VALID, reject_run(VALID))[0][0]["kind"] == "VALID_ERROR"
+    # guard corruption before the rejection is still reported
+    res = reject_run(VALID)
+    res["results"][1]["guard_bad"] = 1
+    assert [f["kind"] for f in classify(VALID, res, backend="nccl")[0]] == ["GUARD"]
+
+
+def test_hang_detail_carries_the_stack_dump():
+    res = {
+        "kind": "hang",
+        "results": [None, None],
+        "stuck_ranks": [0, 1],
+        "hang_log": "[rank 0] File x.py, line 3 in wait",
+    }
+    (f,), _ = classify(VALID, res, backend="nccl")
+    assert f["kind"] == "HANG" and "line 3 in wait" in f["detail"]
+
+
+def test_nccl_env_uses_nonblocking_communicators_with_a_bounded_timeout(monkeypatch):
+    from distfuzz.collectives.executor import nccl_env
+
+    monkeypatch.delenv("DISTFUZZ_NCCL_NONBLOCKING", raising=False)
+    env = nccl_env(3.0)
+    assert env["TORCH_NCCL_USE_COMM_NONBLOCKING"] == "1" and env["TORCH_NCCL_NONBLOCKING_TIMEOUT"] == "6"
+    assert env["TORCH_NCCL_BLOCKING_WAIT"] == "1"
+    monkeypatch.setenv("DISTFUZZ_NCCL_NONBLOCKING", "0")
+    assert "TORCH_NCCL_USE_COMM_NONBLOCKING" not in nccl_env(3.0)
+
+
+class Restartable(FakeSession):
+    def __init__(self, *runs):
+        self.runs, self.calls, self.restarts = list(runs), 0, 0
+
+    def run(self, prog, timeout=None):
+        self.calls += 1
+        return self.runs.pop(0)
+
+    def restart(self):
+        self.restarts += 1
+
+
+def test_nccl_value_finding_must_recur_on_fresh_ranks(tmp_path):
+    import json
+
+    bad = ok_run(VALID, lambda r, o: o["t1"].add_(1))
+    fz = Fuzzer(str(tmp_path), mode="random", world=2, backend="nccl")
+    fz.sess, fz.t0 = Restartable(bad, ok_run(VALID)), 0.0
+    fz.execute(VALID)
+    assert fz.findings == {} and fz.sess.restarts == 1 and fz.stats["unconfirmed"] == 1
+    rec = json.loads((tmp_path / "unconfirmed.jsonl").read_text())
+    assert rec["fresh"] and rec["prog"] == VALID and rec["sig"].startswith("nccl:WRONG_RESULT")
+    fz.sess = Restartable(bad, bad)
+    fz.execute(VALID)
+    assert (
+        list(fz.findings) == ["nccl:WRONG_RESULT|all_reduce|torch.int64"]
+        and "history" in fz.findings["nccl:WRONG_RESULT|all_reduce|torch.int64"]
+    )
+    # gloo findings are deterministic enough: no rerun
+    fz2 = Fuzzer(str(tmp_path / "g"), mode="random", world=2)
+    fz2.sess, fz2.t0 = Restartable(bad), 0.0
+    fz2.execute(VALID)
+    assert fz2.sess.calls == 1 and "WRONG_RESULT|all_reduce|torch.int64" in fz2.findings
 
 
 @pytest.mark.multirank

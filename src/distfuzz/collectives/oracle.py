@@ -87,6 +87,22 @@ def is_timeout(msg):
 
 
 NCCL_WATCHDOG = re.compile(r"(?i)watchdog caught collective operation timeout|timeout at nccl work")
+# ProcessGroupNCCL's check_gpu_single_tensor / check_gpu_tensors_same_device: documented NCCL input rules that the
+# Gloo-shaped reference does not model (desc.NCCL_SEMANTICS, "input layout"). The raising rank leaves the program,
+# so whatever its peers do afterwards (time out, block, finish) is a consequence, not a finding.
+NCCL_REJECT = re.compile(
+    r"Tensors must be contiguous|Tensors must be non-overlapping and dense|Tensors for P2P must be non-overlapping"
+)
+
+
+def nccl_rejected(results):
+    """True if a rank that reported raised one of NCCL's documented layout rejections."""
+    return any(
+        e and e.get("type") == "ValueError" and NCCL_REJECT.search(e.get("msg", ""))
+        for r in results
+        if r
+        for e in [r.get("exc")]
+    )
 
 
 def effective_kind(res, backend="gloo"):
@@ -120,6 +136,7 @@ def _classify(prog, res, ref, backend):
         "checked": False,
         "oom": False,
         "nccl_unchecked": 0,
+        "nccl_rejected": 0,
     }
     victims = {c["args"]["victim"] for c in prog["calls"] if c["op"] == "crash_rank"}
     if res["kind"] == "crash" and victims:
@@ -148,8 +165,14 @@ def _classify(prog, res, ref, backend):
     if res["kind"] == "hang" and backend == "nccl" and ref.status == "invalid" and not victims:
         info["nccl_unchecked"] = 1  # NCCL does not detect the mismatch; blocking until the timeout is documented
         return [], info
+    if res["kind"] in ("hang", "ok") and backend == "nccl" and nccl_rejected(res["results"]):
+        info["nccl_rejected"] = 1
+        if res["kind"] == "hang":
+            return [], info
     if res["kind"] == "hang":
         detail = f"stuck ranks {res.get('stuck_ranks')}"
+        if res.get("hang_log"):
+            detail += "\n" + res["hang_log"][-3000:]
         if victims:
             return [dict(kind="KILL_SURVIVOR_HANG", sig=f"KILL_SURVIVOR_HANG|{ref.status}", detail=detail)], info
         return [dict(kind="HANG", sig=f"HANG|{ref.status}", detail=detail)], info
@@ -184,7 +207,7 @@ def _classify(prog, res, ref, backend):
             )
         )
     undefined = any(e and e["type"] == "FuzzerUndefinedVar" for e in excs)
-    if undefined:
+    if undefined or info["nccl_rejected"]:
         return findings, info
     if ref.status == "valid" and info["exc"]:
         raised = [e for e in excs if e]
