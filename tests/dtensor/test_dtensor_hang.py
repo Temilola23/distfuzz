@@ -152,3 +152,16 @@ def test_watchdog_quiet_when_view_groups_returns():
     code = SPIN.replace("SRC", "(0,)").replace("DST", "(2, 0)")
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
     assert json.loads(r.stdout.strip().splitlines()[-1]) == dict(kind="returned")
+
+
+def test_deadlocked_rank_divergent_error_keeps_its_error_signature():
+    # ranks 2 and 3 raised in the step and wait in the harness's flag exchange; 0 and 1 wait in the op's collective
+    reps = [_rep("collective", file="_functional_collectives.py", func="wait_tensor", coll="wait_tensor")] * 2
+    err = "RuntimeError: The size of tensor a (N) must match the size of tensor b (N) at non-singleton dimension N"
+    reps += [
+        dict(_rep("collective", func="all_gather", coll="all_gather@harness"), err=err, expr="v1.view((0, 3))")
+    ] * 2
+    f = hang_finding(reps)
+    assert f["kind"] == "RANK_DIVERGENT_ERROR" and f["msg"] == err
+    assert f["hang"] == "collective|wait_tensor|ranks-missing:[2, 3]"
+    assert signature(f) == signature(dict(kind="RANK_DIVERGENT_ERROR", step=1, expr="v1.view((0, 3))", msg=err))

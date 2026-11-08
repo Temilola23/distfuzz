@@ -117,6 +117,7 @@ class Watchdog:
         self.job = None
         self.fired = False
         self.step = (-1, "")
+        self.err = None
         self.track = None
         threading.Thread(target=self._run, daemon=True).start()
 
@@ -125,6 +126,7 @@ class Watchdog:
             self.fired = False
             self.track = None
             self.step = (-1, "")
+            self.err = None
             self.job = dict(wd, t0=time.monotonic()) if wd else None
 
     def disarm(self):
@@ -185,6 +187,7 @@ class Watchdog:
             coll=info["coll"],
             step=self.step[0],
             expr=self.step[1],
+            err=self.err,
             held=round(held, 2),
             elapsed=round(elapsed, 2),
             stack=info["stack"],
@@ -216,6 +219,18 @@ def hang_finding(reports):
         missing = [i for i in range(len(reports)) if i not in inside]
         where = f"collective|{name}|ranks-missing:{missing}"
         lead = next(r for _, r in coll if r["coll"] == name)
+        errs = [reports[i]["err"] for i in missing if reports[i] and reports[i].get("err")]
+        if errs:
+            # the missing ranks raised in this step and wait in the harness's error-flag exchange while the others
+            # wait in the step's own collective: a rank-divergent error that deadlocks instead of being exchanged
+            return dict(
+                kind="RANK_DIVERGENT_ERROR",
+                step=lead["step"],
+                expr=lead["expr"],
+                msg=Counter(errs).most_common(1)[0][0],
+                hang=where,
+                ranks=[f"{r['kind']}:{r.get('coll') or _loc(r)}" if r else None for r in reports],
+            )
     else:
         loc = Counter(_loc(r) for _, r in got).most_common(1)[0][0]
         where = "stuck|" + loc

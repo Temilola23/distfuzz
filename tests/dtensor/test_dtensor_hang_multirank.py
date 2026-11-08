@@ -57,3 +57,15 @@ def test_collective_hang_names_the_missing_rank(world):
 def test_clean_program_after_hang(world):
     status, res = world.run(_prog(["v0 + 1"], (4,)), 30)
     assert status == "ok" and all(not r["findings"] for r in res), res
+
+
+def test_rank_divergent_error_inside_a_collective_step_is_reported_as_such(world):
+    # rank 3 raises before the all_reduce the others enter; without the error the deadlock would look like a hang
+    expr = (
+        "torch.distributed.all_reduce(v0.clone()) if torch.distributed.get_rank() != 3 "
+        "else (_ for _ in ()).throw(RuntimeError('rank 3 only'))"
+    )
+    status, res = world.run(_prog([expr], (2,)), 30)
+    assert status == "hang", (status, res)
+    f = hang_finding(res)
+    assert signature(f) == "RANK_DIVERGENT_ERROR|torch.distributed.al|RuntimeError: rank N only", f

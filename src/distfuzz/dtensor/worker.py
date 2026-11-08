@@ -156,6 +156,7 @@ def check_value(tag, si, expr, rv, dv, findings, hashes):
         full = dv.full_tensor() if is_dt else dv
     except Exception as e:
         err = e
+        WD.err = norm_msg(e)
     flags = sync_flag(err is not None)
     if any(flags) and not all(flags):
         findings.append(
@@ -194,7 +195,7 @@ def run_program(prog):
     try:
         for si, st in enumerate(prog["steps"]):
             expr, out = st["expr"], st["out"]
-            WD.step = (si, expr)
+            WD.step, WD.err = (si, expr), None
             refs = set(NAME_RE.findall(expr))
             cascade = bool(refs & tainted)
             rerr = derr = None
@@ -206,6 +207,7 @@ def run_program(prog):
                 dv = eval(expr, denv)
             except Exception as e:
                 derr, dv = e, None
+                WD.err = norm_msg(e)
                 if os.environ.get("DTF_TB"):
                     traceback.print_exc()
             flags = sync_flag(derr is not None)
@@ -255,7 +257,7 @@ def run_program(prog):
                     if mut:
                         tainted.update(refs)
         for si, out in live:
-            WD.step = (si, "FINAL " + prog["steps"][si]["expr"])
+            WD.step, WD.err = (si, "FINAL " + prog["steps"][si]["expr"]), None
             scratch = []
             check_value("FINAL_", si, prog["steps"][si]["expr"], renv[out], denv[out], scratch, hashes)
             if out not in tainted:
@@ -281,7 +283,7 @@ def run_program(prog):
                 continue
             if rg is None:
                 continue
-            WD.step = (-1, f"mk({i}).grad")
+            WD.step, WD.err = (-1, f"mk({i}).grad"), None
             check_value("GRAD_", -1, f"mk({i}).grad", rg, dg, findings, hashes)
     except Abort:
         return findings, hashes, True
