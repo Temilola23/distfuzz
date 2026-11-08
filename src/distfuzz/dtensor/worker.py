@@ -31,6 +31,7 @@ from torch.distributed.tensor import DTensor  # noqa: E402
 from torch.distributed.tensor._utils import compute_local_shape_and_global_offset  # noqa: E402
 
 from distfuzz.dtensor.gen import MUT_RE, NAME_RE  # noqa: E402
+from distfuzz.dtensor.hang import Watchdog  # noqa: E402
 from distfuzz.dtensor.runtime import Ctx, compare, make_env  # noqa: E402
 
 torch.set_num_threads(1)
@@ -66,6 +67,14 @@ W = args.world
 # the 1-d mesh reuses the default PG; control-plane collectives on it can pair with a lagging DTensor collective
 SYNC_PG = dist.new_group(backend="gloo", timeout=datetime.timedelta(seconds=20))
 MESHES = {"1d": init_device_mesh("cpu", (W,))}
+CUR = {"id": None}
+
+
+def _emit_hang(rep):
+    proto.write(json.dumps(dict(id=CUR["id"], rank=args.rank, hang=rep)) + "\n")
+
+
+WD = Watchdog(_emit_hang, harness_groups=(SYNC_PG,))
 if W == 4:
     MESHES["2d"] = init_device_mesh("cpu", (2, 2))
 if W == 6:
@@ -185,6 +194,7 @@ def run_program(prog):
     try:
         for si, st in enumerate(prog["steps"]):
             expr, out = st["expr"], st["out"]
+            WD.step = (si, expr)
             refs = set(NAME_RE.findall(expr))
             cascade = bool(refs & tainted)
             rerr = derr = None
@@ -245,6 +255,7 @@ def run_program(prog):
                     if mut:
                         tainted.update(refs)
         for si, out in live:
+            WD.step = (si, "FINAL " + prog["steps"][si]["expr"])
             scratch = []
             check_value("FINAL_", si, prog["steps"][si]["expr"], renv[out], denv[out], scratch, hashes)
             if out not in tainted:
@@ -270,6 +281,7 @@ def run_program(prog):
                 continue
             if rg is None:
                 continue
+            WD.step = (-1, f"mk({i}).grad")
             check_value("GRAD_", -1, f"mk({i}).grad", rg, dg, findings, hashes)
     except Abort:
         return findings, hashes, True
@@ -286,6 +298,8 @@ def main():
         if prog.get("cmd") == "exit":
             break
         t0 = time.time()
+        CUR["id"] = prog.get("id")
+        WD.arm(prog.get("wd"))
         try:
             findings, hashes, aborted = run_program(prog)
             fatal = None
@@ -299,6 +313,9 @@ def main():
                 dist.barrier(group=SYNC_PG)
             except Exception:
                 aborted = True
+        if WD.disarm():
+            # the watchdog already answered for this program; the parent restarts the world
+            os._exit(0)
         proto.write(
             json.dumps(
                 dict(

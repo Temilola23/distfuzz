@@ -6,6 +6,7 @@ import re
 
 from distfuzz.dtensor.fuzz import signature
 from distfuzz.dtensor.gen import NAME_RE, parse_R
+from distfuzz.dtensor.hang import hang_finding
 from distfuzz.dtensor.world import World
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -25,6 +26,8 @@ class Tester:
         out = set()
         if status == "timeout":
             out.add("HANG||program timeout")
+        elif status == "hang":
+            out.add(signature(hang_finding(res)))
         elif status == "crash":
             out.add("CRASH")
         if res and status in ("ok", "aborted"):
@@ -50,6 +53,8 @@ def well_formed(steps):
 
 
 def sig_match(target, sigs):
+    # a HANG target is matched exactly: the signature names the stuck loop or collective, and a shrunk program that
+    # hangs somewhere else is a different bug
     if target.startswith("CRASH"):
         return "CRASH" in sigs
     if target.startswith("RANK_DIVERGENT_ERROR"):
