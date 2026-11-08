@@ -75,10 +75,12 @@ Success criteria: at least 30 distinct harvested plans; each one runs clean thro
 
 | # | Item | Why | Effort |
 |---|---|---|---|
-| H1 | Triage `HANG\|collective\|all_gather@harness\|ranks-missing:[0]`: rank 0 waits in `wait_tensor` while the other ranks have no error and sit in the harness flag exchange | Either DTensor issues a collective on one rank only, or a pending async collective from an earlier step is waited on by rank 0 only; both are worth knowing, and it appeared in every detection run | 1 day |
+| H1 | Key collective hangs that carry no error on the step's op instead of the `ranks-missing` list, and keep the list in the finding | The rank-dependent strategy choice (VERIFIED.md §22) deadlocks with a different set of waiting ranks each time and produced five signatures in two 30-minute runs | 0.5 day |
 | H2 | Name more CPU loops: only `view_groups` has a branch labeller. Add one for any other loop that shows up as `HANG\|cpu\|<file>:<func>` | Unknown loops are keyed by function only, so two branches of one loop would merge | 0.5 day per loop |
 | H3 | Hangs inside C++ that hold the GIL never let the watchdog run and still fall back to `HANG\|\|program timeout`; dump them with `faulthandler.dump_traceback_later` per rank and parse the native frames | Keeps the legacy signature from merging those cases | 1 day |
 | H4 | Per-signature deflake for HANG: re-run each new hang signature twice before admitting it, as the minimiser already does | The 12 s collective threshold can misfire on an overloaded host | 0.5 day |
+| H5 | Taint the outputs of a view whose base is later mutated in place, or skip their FINAL checks | The known #147570 class (in-place through a view DTensor had to copy) accounted for 17 of the 65 new signatures in the final runs | 1 day |
+| H6 | Validate placement count in `R(...)` targets, or record that DTensor accepts more placements than mesh dims | `redistribute` to `[Shard(0), Replicate()]` on a 1-D mesh is accepted silently; the mesh mutation keeps such targets on purpose, so every such step is a missing-validation case nobody has triaged | 0.5 day |
 
 ## Other items found on the way
 
