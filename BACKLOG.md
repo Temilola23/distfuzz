@@ -19,7 +19,7 @@ Roadmap in priority order, then open questions about findings. Effort figures ar
 
 ## Directions
 
-Five larger directions, each a fuzzer of its own. Tracks 1, 2, 3 and 5 are being built on `feat/train-fuzz` and track 4 on `feat/compile-fuzz`; this section is the shared spec.
+Six larger directions, each a fuzzer of its own. Tracks 1, 2, 3 and 5 are being built on `feat/train-fuzz` and track 4 on `feat/compile-fuzz`; this section is the shared spec.
 
 ### 1. Whole-training-step fuzzing against a single-device reference
 
@@ -70,6 +70,39 @@ Design sketch: harvest parallelism plans and model shapes from torchtitan (`para
 Oracle: whatever the consuming track uses; this track only changes inputs.
 
 Success criteria: at least 30 distinct harvested plans; each one runs clean through the training-step oracle on a known-good release, or yields a triaged finding; a campaign seeded from harvested plans reaches more strategy ops per hour than random placements (measured with `reach.py`-style counting under DTensor dispatch).
+
+### 6. Reverse fuzzing: a root-causing mode (`distfuzz.rca`)
+
+Goal: every finding comes out with its top suspect source lines, so a report needs a confirming patch instead of a manual hunt. Today this exists only as research code (`research/sbfl-2026-10/flip.py`, `sbfl.py`, `rank.py`; `research/vperturb-2026-11/`), and every one of the 43 recorded causes was found by reading code.
+
+Design sketch: given a minimised failing program, (1) generate about 300 nearby variants (shapes, placements, dtypes, sizes) and label each pass or fail against the reference; (2) record executed `torch.distributed` lines and branch directions with `sys.monitoring` and rank lines by Ochiai score; (3) on the region (lines run only by failing variants plus the top 100), try branch flips (one evaluation or all), call and assignment skips, and value perturbations (constants and indices plus or minus one, `/` and `//`, dtype preservation, sibling-statement insertion); a line counts when a change makes a failing variant match the reference; (4) rank by repaired variants, then by fewest other decisions changed. Output: top-5 lines with the repairing change, attached to the finding and to `repro` bundles.
+
+Oracle: the existing reference comparison per variant. Ground truth for evaluation: the cause lines recorded in `research/rca-2026-10/VERIFIED.md`.
+
+Current evidence (research code): injected bugs, faulty line first for 16 of 47 with flips and 18 of 47 with value perturbation; real bugs used in the design, cause or applying decision in the top 3 for 3 of 5; held-out real bugs, 1 of 7 at top 1 (§16). The search region is the measured ceiling: the cause never entered it for 3 of the 7.
+
+Success criteria: (a) a `python -m distfuzz.rca <finding>` command that runs inside the existing Docker setup; (b) on the 23 bugs recorded since October (a held-out set the method was not tuned on), report top-1/top-5 against the branch-flip baseline; (c) no regression on the 47 injected bugs.
+
+## Reverse fuzzing improvements
+
+| # | Item | Why | Effort |
+|---|---|---|---|
+| R1 | Run the current stage on the 23 bugs found since October (§19-§26, §30-§34, §50-§53, §70-§75 where a DTensor family can express them) | Held-out results so far rest on 7 bugs; 23 is a usable test set and the method was never tuned on them | 1-2 days CPU |
+| R2 | Record coverage on every rank and build the region from lines run only by failing variants on any rank | Rank 0 only today; for 3 of 7 held-out bugs the cause never entered the region, so no operator could try it | 1 day |
+| R3 | Widen the region adaptively: grow from top 100 when no change repairs, with a trial budget per line instead of per bug | The 2,000-trial cap cut all 233 conv-handler sites in the wider-region §17 run | 1 day |
+| R4 | Drop or demote the "replace with another local" operator, and penalise repairs that change the chosen sharding strategy or redistribution path | It never repaired a cause line, made §11 and §14 rank worse, and route-arounds win the side-effect tie-break | 0.5 day |
+| R5 | Detect route-arounds explicitly: a repair that changes the selected strategy for the failing op is labelled and ranked below repairs that keep it | Most misses (§30, §32, §16 before value perturbation) were strategy route-arounds | 1 day |
+| R6 | Several seeds and more failing variants per bug, with ranks reported as a distribution | One seed and 3 failing variants per bug today | 0.5 day |
+| R7 | Families beyond DTensor ops: c10d collectives (with the C++ edge coverage build), DCP and the train profile | All evaluation so far is on DTensor operator families | 1-2 weeks |
+| R8 | A missing-statement catalog mined automatically from sibling handlers, instead of the hand-written one | The sibling-statement operator expressed the §17 fix but was designed knowing it; an automatic catalog removes that circularity | 2 days |
+| R9 | Integrate into reports: `distfuzz.repro` bundles and issue drafts get a "suspected cause" section with the top-5 lines and the repairing change | Closes the loop from finding to draft | 1 day |
+
+## Oracle coverage
+
+| # | Item | Why | Effort |
+|---|---|---|---|
+| O1 | Break down why programs are labelled "uncertain" by the reference model and fix the cheap causes | In the seed-5 random run 28,400 of 73,788 programs (38%) were uncertain, so their values were never checked | 0.5 day analysis |
+| O2 | Metamorphic pilot on the uncertain programs: placement invariance (same program under different placements and mesh shapes gives the same `full_tensor()`), redistribute round trip (A to B to A is exact), world-size invariance; exact for integers, tolerance per dtype otherwise | Covers programs the reference cannot predict; keep only if it finds bugs the reference misses | 1 day pilot |
 
 ## Follow-ups from the hang dedup fix
 
