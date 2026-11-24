@@ -34,6 +34,7 @@ ignore = ["C408", "B905"]
 [tool.ruff.lint.per-file-ignores]
 # emitted repro source and report HTML are string templates
 "src/distfuzz/repro/{gen_distfuzz,gen_dtensor,render}.py" = ["E501"]
+"src/distfuzz/compile/repro.py" = ["E501"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
