@@ -40,9 +40,17 @@ FS = dict(units=["0"], raf=True, raf_root=True, resave=False)
 
 @pytest.fixture(scope="module")
 def pools():
+    # as in the campaigns (DCP_PG_TIMEOUT=600): with the 30 s default, Gloo's own timeout races run()'s 30 s
+    # segment timeout, and a hang (rank 0 stuck in a broadcast) can come back as a send-timeout PARTIAL_ERR
+    old = os.environ.get("DCP_PG_TIMEOUT")
+    os.environ["DCP_PG_TIMEOUT"] = "600"
     p = Pools(tempfile.mkdtemp(prefix="trainmr_"), cov=False)
     yield p
     p.close()
+    if old is None:
+        os.environ.pop("DCP_PG_TIMEOUT")
+    else:
+        os.environ["DCP_PG_TIMEOUT"] = old
 
 
 def run(pools, scn):
