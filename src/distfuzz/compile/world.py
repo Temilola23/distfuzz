@@ -36,7 +36,7 @@ class World(DTWorld):
                 cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log, text=True, bufsize=1, env=renv
             )
             self.procs.append(p)
-        res = self._collect(self.startup_timeout)
+        res, _ = self._collect(self.startup_timeout)
         if res is None or not all(isinstance(r, dict) and r.get("ready") for r in res):
             self.kill()
             raise RuntimeError(f"world failed to start: {res}")
