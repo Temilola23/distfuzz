@@ -16,9 +16,12 @@ def free_port():
 
 
 class World:
-    def __init__(self, n, logdir, cov=True, startup_timeout=90):
+    # loop_secs: a torch.distributed frame spinning this long is a hang (view_groups calls take microseconds);
+    # coll_secs: a collective waiting this long is a hang, and must stay below the workers' 20 s Gloo timeout
+    def __init__(self, n, logdir, cov=True, startup_timeout=90, loop_secs=5.0, coll_secs=12.0, grace=3.0):
         self.n, self.logdir, self.cov = n, logdir, cov
         self.startup_timeout = startup_timeout
+        self.loop_secs, self.coll_secs, self.grace = loop_secs, coll_secs, grace
         self.procs = []
         self.restarts = 0
         os.makedirs(logdir, exist_ok=True)
@@ -56,7 +59,7 @@ class World:
                 env=env,
             )
             self.procs.append(p)
-        res = self._collect(self.startup_timeout)
+        res, _ = self._collect(self.startup_timeout)
         if res is None or not all(isinstance(r, dict) and r.get("ready") for r in res):
             self.kill()
             raise RuntimeError(f"world failed to start: {res}")
@@ -67,25 +70,31 @@ class World:
             sel.register(p.stdout, selectors.EVENT_READ, i)
         out = [None] * self.n
         deadline = time.time() + timeout
+        hung = False
         while any(o is None for o in out):
             rem = deadline - time.time()
             if rem <= 0:
                 sel.close()
-                return None
+                return (out if hung else None), True
             for key, _ in sel.select(rem):
                 i = key.data
                 line = self.procs[i].stdout.readline()
                 if not line:
                     sel.close()
                     out[i] = {"dead": True, "rc": self.procs[i].poll()}
-                    return out
+                    return out, False
                 out[i] = json.loads(line)
                 sel.unregister(self.procs[i].stdout)
+                if "hang" in out[i] and not hung:
+                    # the other ranks' watchdogs fire within a moment if they are stuck too; wait that long, no more
+                    hung = True
+                    deadline = min(deadline, time.time() + self.grace)
         sel.close()
-        return out
+        return out, False
 
     def run(self, prog, timeout):
-        line = json.dumps(prog) + "\n"
+        wd = dict(deadline=max(timeout - 2.0, timeout * 0.8), loop=self.loop_secs, coll=self.coll_secs)
+        line = json.dumps(dict(prog, wd=wd)) + "\n"
         try:
             for p in self.procs:
                 p.stdin.write(line)
@@ -93,10 +102,13 @@ class World:
         except (BrokenPipeError, OSError):
             self.restart()
             return "crash", None
-        res = self._collect(timeout)
+        res, _ = self._collect(timeout)
         if res is None:
             self.restart()
             return "timeout", None
+        if any(r is not None and "hang" in r for r in res):
+            self.restart()
+            return "hang", [r["hang"] if r is not None and "hang" in r else None for r in res]
         if any(r is None or r.get("dead") for r in res):
             rcs = [p.poll() for p in self.procs]
             self.restart()

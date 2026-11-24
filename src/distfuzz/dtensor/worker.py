@@ -31,6 +31,7 @@ from torch.distributed.tensor import DTensor  # noqa: E402
 from torch.distributed.tensor._utils import compute_local_shape_and_global_offset  # noqa: E402
 
 from distfuzz.dtensor.gen import MUT_RE, NAME_RE  # noqa: E402
+from distfuzz.dtensor.hang import Watchdog  # noqa: E402
 from distfuzz.dtensor.runtime import Ctx, compare, make_env  # noqa: E402
 
 torch.set_num_threads(1)
@@ -66,6 +67,14 @@ W = args.world
 # the 1-d mesh reuses the default PG; control-plane collectives on it can pair with a lagging DTensor collective
 SYNC_PG = dist.new_group(backend="gloo", timeout=datetime.timedelta(seconds=20))
 MESHES = {"1d": init_device_mesh("cpu", (W,))}
+CUR = {"id": None}
+
+
+def _emit_hang(rep):
+    proto.write(json.dumps(dict(id=CUR["id"], rank=args.rank, hang=rep)) + "\n")
+
+
+WD = Watchdog(_emit_hang, harness_groups=(SYNC_PG,))
 if W == 4:
     MESHES["2d"] = init_device_mesh("cpu", (2, 2))
 if W == 6:
@@ -119,14 +128,18 @@ def check_value(tag, si, expr, rv, dv, findings, hashes):
             )
         try:
             exp_local, _ = compute_local_shape_and_global_offset(dv.shape, dv.device_mesh, dv.placements)
-            if tuple(exp_local) != tuple(dv.to_local().shape):
+            # no_grad: a multi-output view (chunk) of a base mutated in place cannot be used under grad mode, on
+            # plain tensors too; the reference never uses it, so only the observation would raise
+            with torch.no_grad():
+                local_shape = tuple(dv.to_local().shape)
+            if tuple(exp_local) != local_shape:
                 findings.append(
                     dict(
                         kind=tag + "LOCAL_SHAPE",
                         step=si,
                         expr=expr,
                         msg=f"placements={dv.placements} global={tuple(dv.shape)} "
-                        f"expected local={tuple(exp_local)} actual={tuple(dv.to_local().shape)}",
+                        f"expected local={tuple(exp_local)} actual={local_shape}",
                     )
                 )
         except Exception as e:
@@ -144,9 +157,11 @@ def check_value(tag, si, expr, rv, dv, findings, hashes):
         )
     full, err = None, None
     try:
-        full = dv.full_tensor() if is_dt else dv
+        with torch.no_grad():
+            full = dv.full_tensor() if is_dt else dv
     except Exception as e:
         err = e
+        WD.err = norm_msg(e)
     flags = sync_flag(err is not None)
     if any(flags) and not all(flags):
         findings.append(
@@ -185,6 +200,7 @@ def run_program(prog):
     try:
         for si, st in enumerate(prog["steps"]):
             expr, out = st["expr"], st["out"]
+            WD.step, WD.err = (si, expr), None
             refs = set(NAME_RE.findall(expr))
             cascade = bool(refs & tainted)
             rerr = derr = None
@@ -196,6 +212,7 @@ def run_program(prog):
                 dv = eval(expr, denv)
             except Exception as e:
                 derr, dv = e, None
+                WD.err = norm_msg(e)
                 if os.environ.get("DTF_TB"):
                     traceback.print_exc()
             flags = sync_flag(derr is not None)
@@ -245,6 +262,7 @@ def run_program(prog):
                     if mut:
                         tainted.update(refs)
         for si, out in live:
+            WD.step, WD.err = (si, "FINAL " + prog["steps"][si]["expr"]), None
             scratch = []
             check_value("FINAL_", si, prog["steps"][si]["expr"], renv[out], denv[out], scratch, hashes)
             if out not in tainted:
@@ -270,6 +288,7 @@ def run_program(prog):
                 continue
             if rg is None:
                 continue
+            WD.step, WD.err = (-1, f"mk({i}).grad"), None
             check_value("GRAD_", -1, f"mk({i}).grad", rg, dg, findings, hashes)
     except Abort:
         return findings, hashes, True
@@ -286,6 +305,8 @@ def main():
         if prog.get("cmd") == "exit":
             break
         t0 = time.time()
+        CUR["id"] = prog.get("id")
+        WD.arm(prog.get("wd"))
         try:
             findings, hashes, aborted = run_program(prog)
             fatal = None
@@ -299,6 +320,9 @@ def main():
                 dist.barrier(group=SYNC_PG)
             except Exception:
                 aborted = True
+        if WD.disarm():
+            # the watchdog already answered for this program; the parent restarts the world
+            os._exit(0)
         proto.write(
             json.dumps(
                 dict(

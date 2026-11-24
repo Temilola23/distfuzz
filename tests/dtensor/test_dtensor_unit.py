@@ -59,6 +59,9 @@ def test_mut_re_matches_inplace_only():
     assert MUT_RE.search("v1.mul_(2)")
     assert MUT_RE.search("SETITEM(v1, 0, 5)")
     assert MUT_RE.search("BW(v3)")
+    # DTensor refuses F.x(..., inplace=True) on a Partial input while the reference mutates; unless the step counts
+    # as a mutation the worker carries on with diverged values and reports later steps (var_mean, einsum, ...)
+    assert MUT_RE.search("F.hardtanh(v1, inplace=True)")
     for e in (
         "torch.nan_to_num(v1.log())",
         "F.one_hot(v1, 3)",
@@ -181,11 +184,18 @@ def test_nn_ops_cover_every_family_and_evaluate():
 
 
 def test_no_ops_that_depend_on_the_sign_of_zero():
-    # sum over ranks turns -0.0 into +0.0, so these would report false mismatches on Partial(sum) inputs
+    # sum over ranks turns -0.0 into +0.0, so these would report false mismatches on Partial(sum) inputs. The tail
+    # group's forms are safe: copysign takes its sign from |x| + 0.5 and signbit never sees a zero
+    safe = re.compile(
+        r"copysign_?\((?:v\d+, )?v\d+\.abs\(\) \+ 0\.5\)|torch\.signbit\(torch\.where\((v\d+) == 0, 1\.0, \1\)\)"
+    )
     gen = Gen(4, random.Random(5))
     for _ in range(60):
         p = gen.generate()
-        assert not [s["expr"] for s in p["steps"] if re.search(r"copysign|signbit", s["expr"])]
+        for st in p["steps"]:
+            e = st["expr"]
+            if re.search(r"copysign|signbit", e):
+                assert safe.search(e), e
 
 
 def test_mutate_programs_are_ref_valid():
@@ -326,3 +336,136 @@ def test_minimize_target_step_not_pinned():
     mp, status = minimize(prog, "MISMATCH|max|values", StubTester("max("), 4)
     assert status == "ok"
     assert len(mp["steps"]) == 2
+
+
+def test_opname_torch_special_and_bit_operators():
+    assert opname("torch.special.bessel_j0(v1)") == "bessel_j0"
+    assert opname("torch.special.bessel_j1(v1)") == "bessel_j1"
+    assert opname("v1 ^ 3") == "^"
+    assert opname("v1 << 1") == "<<"
+
+
+def test_zero_shape_has_zero_numel_and_reaches_trailing_and_repeated_zeros():
+    gen = Gen(4, random.Random(2))
+    shapes = [eval(gen.zero_shape(src)) for src in ([4, 0], [0], [3, 0], [0, 7, 4, 4]) for _ in range(200)]
+    assert all(0 in s and 1 <= len(s) <= 6 for s in shapes)
+    assert any(s.count(0) >= 2 for s in shapes)
+    # zero dims after the source's own dims, as in (4, 0) -> (4, 2, 0, 0, 0)
+    assert any(len(s) >= 3 and s[-1] == 0 and s[-2] == 0 for s in shapes)
+    assert any(s[0] == 0 and any(d > 1 for d in s[1:]) for s in shapes)
+    for s in shapes:
+        assert torch.empty(4, 0).reshape(s).shape == torch.Size(s)
+
+
+def test_gen_full_linalg_kinds_are_well_conditioned():
+    for kind in ("dd", "spd"):
+        for shape in ([3, 3], [2, 4, 4], [1, 1], [0, 2, 2]):
+            A = gen_full(dict(shape=shape, dtype="f64", seed=5, kind=kind))
+            assert torch.equal(A, A.round())
+            torch.linalg.inv(A)
+            if kind == "spd":
+                assert torch.equal(A, A.mT)
+                torch.linalg.cholesky(A)
+    # non-square shapes (after a shape mutation) fall back to plain integers
+    assert gen_full(dict(shape=[2, 3], dtype="f32", seed=5, kind="dd")).shape == (2, 3)
+
+
+LINALG_FAMILIES = {
+    "cross": r"linalg\.cross|torch\.cross",
+    "solve_triangular": r"solve_triangular|triangular_solve",
+    "solve": r"linalg\.solve\(|lu_solve|cholesky_solve|ldl_solve|ormqr",
+    "decomp": r"det|slogdet|qr|svdvals|inv|cholesky\(|eigvalsh|matrix_exp|pinv|lu_factor",
+}
+
+
+def test_linalg_ops_cover_every_family_and_evaluate():
+    gen = Gen(4, random.Random(4))
+    seen, ok = set(), 0
+    for shape in ([2, 3], [3, 3], [1, 4, 3], [5], [2, 1, 3, 2]):
+        for _ in range(40):
+            prog = dict(mesh="1d", inputs=[], steps=[], nv=0)
+            j = gen.new_input(prog, shape, "f32")
+            prog["steps"].append(dict(out=gen.fresh_name(prog), expr=f"mk({j})"))
+            env = gen.replay(prog)[0]
+            expr = gen.p_linalg(prog, env, ["v0"], "v0", env["v0"])
+            env = gen.replay(prog)[0]
+            out = eval(expr, env)
+            assert isinstance(out, torch.Tensor), expr
+            ok += 1
+            seen |= {f for f, pat in LINALG_FAMILIES.items() if re.search(pat, expr)}
+    assert seen == set(LINALG_FAMILIES) and ok == 200
+
+
+def test_cross_partner_broadcasts_a_size_one_dim():
+    # the shape that breaks linalg_cross_strategy: one operand has size 1 where the other has more
+    gen = Gen(4, random.Random(9))
+    hits = 0
+    for _ in range(200):
+        prog = dict(mesh="1d", inputs=[], steps=[], nv=0)
+        j = gen.new_input(prog, [1, 3], "f32")
+        prog["steps"].append(dict(out=gen.fresh_name(prog), expr=f"mk({j})"))
+        env = gen.replay(prog)[0]
+        expr = gen.cross_op(prog, env, "v0", env["v0"])
+        a, b = (env[n] for n in re.findall(r"\bv\d+\b", expr)[:2])
+        torch.broadcast_shapes(a.shape, b.shape)
+        nd = max(a.dim(), b.dim())
+        sa, sb = [1] * (nd - a.dim()) + list(a.shape), [1] * (nd - b.dim()) + list(b.shape)
+        hits += any((x == 1) != (y == 1) for x, y in zip(sa, sb))
+    assert hits > 20
+
+
+@pytest.mark.parametrize("dt", ["i64", "i32"])
+def test_matmul_takes_integer_inputs(dt):
+    gen = Gen(4, random.Random(1))
+    seen = set()
+    for shape in ([3], [2, 3], [2, 3, 4]):
+        for _ in range(60):
+            prog = dict(mesh="1d", inputs=[], steps=[], nv=0)
+            j = gen.new_input(prog, shape, dt)
+            prog["steps"].append(dict(out=gen.fresh_name(prog), expr=f"mk({j})"))
+            env = gen.replay(prog)[0]
+            expr = gen.p_matmul(prog, env, ["v0"], "v0", env["v0"])
+            env = gen.replay(prog)[0]
+            try:
+                out = eval(expr, env)
+            except RuntimeError:
+                continue  # e.g. a float beta with an integer input
+            assert not out.is_floating_point(), expr
+            seen.add(opname(expr))
+    assert {"baddbmm", "addbmm", "linear", "addmv", "addr"} <= seen, seen
+
+
+def test_tail_ops_evaluate_on_plain_tensors():
+    # each draw must give a valid expression for most inputs, or the group only adds failed proposals
+    gen = Gen(4, random.Random(6))
+    ok = tried = 0
+    names = set()
+    cases = [([3, 4], "f32"), ([2, 3, 4], "f64"), ([1, 2, 4, 4], "f32"), ([2, 2, 2, 2, 2], "f32"), ([5], "i64")]
+    for shape, dt in cases:
+        for _ in range(80):
+            prog = dict(mesh="1d", inputs=[], steps=[], nv=0)
+            for _ in range(2):
+                j = gen.new_input(prog, shape, dt)
+                prog["steps"].append(dict(out=gen.fresh_name(prog), expr=f"mk({j})"))
+            env = gen.replay(prog)[0]
+            expr = gen.p_tail(prog, env, ["v0", "v1"], "v0", env["v0"])
+            if expr is None:
+                continue
+            env = gen.replay(prog)[0]
+            tried += 1
+            try:
+                out = eval(expr, env)
+            except Exception:
+                continue
+            assert out is None or isinstance(out, torch.Tensor), expr
+            ok += 1
+            names.add(opname(expr))
+    assert ok >= 0.85 * tried, (ok, tried)
+    assert {"airy_ai", "erfcx", "_fused_adam_", "_fused_adamw", "_native_batch_norm_legit", "__ilshift__"} <= names
+    assert {"fractional_max_pool3d", "_safe_softmax", "split_with_sizes_copy", "_foreach_powsum"} <= names
+
+
+def test_opname_torch_ops_namespace():
+    assert opname("torch.ops.aten._safe_softmax(v1, 0)") == "_safe_softmax"
+    assert opname("torch.ops.prims.view_of(v0)") == "view_of"
+    assert opname("torch.ops.aten.norm.ScalarOpt_dim(v1, 2, [0])") == "norm"
