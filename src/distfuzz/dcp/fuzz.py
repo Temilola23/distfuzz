@@ -240,7 +240,7 @@ def main(argv):
 
     os.makedirs(a.out, exist_ok=True)
     rng = random.Random(a.seed)
-    gen = (TrainGen if a.profile == "train" else Gen)(rng, max_w=a.max_w)
+    gen = TrainGen(rng, max_w=a.max_w, device=a.device) if a.profile == "train" else Gen(rng, max_w=a.max_w)
     pools = Pools(os.path.join(a.out, "logs"), max_w=a.max_w, device=a.device)
     cov, corpus, sigs, kinds = set(), [], {}, {}
     fsig = open(os.path.join(a.out, "findings.jsonl"), "a")

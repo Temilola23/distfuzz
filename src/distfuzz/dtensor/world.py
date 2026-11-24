@@ -8,6 +8,20 @@ import time
 
 # see collectives.executor.NCCL_ENV: wait() raises after the group timeout instead of blocking the rank forever
 NCCL_ENV = {"TORCH_NCCL_BLOCKING_WAIT": "1", "TORCH_NCCL_ASYNC_ERROR_HANDLING": "1", "TORCH_NCCL_DUMP_ON_TIMEOUT": "0"}
+# Under non-blocking communicators every equal-split all_to_all_single raises "NCCL Error 7: NCCL operation in
+# progress" (GPU run 2, N1), which DTensor's Shard(i) -> Shard(j) and EP token exchanges reach; the error was not
+# sticky, so later programs ran on corrupted state. Workers never inherit the setting from the parent.
+NCCL_NONBLOCKING_VARS = ("TORCH_NCCL_USE_COMM_NONBLOCKING", "TORCH_NCCL_NONBLOCKING_TIMEOUT")
+
+
+def worker_env(device):
+    """Environment for a DTensor or training worker rank."""
+    env = dict(os.environ, OMP_NUM_THREADS="1", PYTHONUNBUFFERED="1")
+    if device == "cuda":
+        env.update(NCCL_ENV)
+        for k in NCCL_NONBLOCKING_VARS:
+            env.pop(k, None)
+    return env
 
 
 def free_port():
@@ -34,9 +48,7 @@ class World:
 
     def start(self):
         port = free_port()
-        env = dict(os.environ, OMP_NUM_THREADS="1", PYTHONUNBUFFERED="1")
-        if self.device == "cuda":
-            env = {**NCCL_ENV, **env}
+        env = worker_env(self.device)
         self.procs = []
         for f in getattr(self, "_logs", []):
             f.close()

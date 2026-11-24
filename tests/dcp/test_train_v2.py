@@ -93,3 +93,32 @@ def test_mutation_keeps_v2_scenarios_valid():
         for _ in range(5):
             s = g.mutate(s)
             assert g.valid(s)
+
+
+def _saves(device):
+    g = TrainGen(random.Random(3), device=device)
+    return [s["save"] for _ in range(150) for s in g.generate()["segs"] if s.get("save")]
+
+
+def test_cuda_generates_no_async_saves():
+    # thread async_save needs a CPU backend, and the workers' groups are NCCL-only under cuda
+    assert any(sv.get("async", "none") != "none" for sv in _saves("cpu"))
+    cuda = _saves("cuda")
+    assert cuda and all(sv.get("async", "none") == "none" for sv in cuda)
+
+
+@pytest.mark.parametrize("cc,ok", [((7, 5), False), ((8, 0), False), ((8, 9), True), ((9, 0), True)])
+def test_float8_needs_compute_capability_8_9_on_cuda(monkeypatch, cc, ok):
+    import torch
+
+    from distfuzz.dcp import train_gen
+
+    monkeypatch.setattr(train_gen, "HAVE_AO", True)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *a: cc)
+    assert train_gen.float8_ok("cuda") is ok and train_gen.float8_ok("cpu")
+    g = TrainGen(random.Random(0), device="cuda")
+    assert g.f8_ok is ok
+    scn = g.generate()
+    scn["f8"] = dict(ag=True, precompute=False)
+    if not ok:
+        assert not g.valid(scn)

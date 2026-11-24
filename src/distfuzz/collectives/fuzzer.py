@@ -238,20 +238,22 @@ class Fuzzer:
         new = [f for f in findings if f["sig"] not in self.findings]
         recheck = self.backend == "nccl" and any(f["kind"] in RECHECK_KINDS for f in new)
         if self.confirm_timeout and new and (info.get("timeouts") or recheck):
-            findings = self.confirm(prog, findings, fresh=recheck, longer=bool(info.get("timeouts")))
+            findings = self.confirm(prog, findings, fresh=recheck, longer=bool(info.get("timeouts")), res=res)
         for f in findings:
             self.record_finding(f, prog, res, info)
         if res["kind"] != "ok":
             self.history.clear()
         return res, (self.new_cover(res) if res["kind"] == "ok" else set())
 
-    def confirm(self, prog, findings, fresh=False, longer=True):
+    def confirm(self, prog, findings, fresh=False, longer=True, res=None):
         """Re-run a program whose new findings involved a collective timeout, at `confirm_timeout`.
 
         A short timeout can fire on a rank that was only slow (a loaded machine), not stuck. New findings that do not
         come back at the longer timeout are dropped and logged to unconfirmed.jsonl; known ones are kept as they are.
         With `fresh` (an NCCL value or crash finding) the ranks are restarted first, so the rerun cannot inherit
         anything from the programs before it; without `longer` (no timeout was involved) it keeps the run's timeout.
+        `res` is the first run's result: its crash_log goes into the unconfirmed record, since later restarts
+        truncate the rank logs.
         """
         self.stats["confirm_runs"] += 1
         if fresh:
@@ -268,6 +270,8 @@ class Fuzzer:
                     rec = dict(sig=f["sig"], t=time.time() - self.t0, again=sorted(again), fresh=fresh, prog=prog)
                     if fresh:
                         rec["history"] = list(self.history)[:-1]
+                    if res and res.get("crash_log"):
+                        rec["crash_log"] = res["crash_log"]
                     fh.write(json.dumps(rec, default=str) + "\n")
         return kept
 

@@ -68,6 +68,21 @@ def _free_port():
     return p
 
 
+def teardown_groups(groups, backend):
+    """Release a program's groups. On NCCL they are aborted, not destroyed: after a desynchronised program,
+    ncclCommDestroy waits for work the peer never matched, which was the remaining hang in GPU run 2 (50 hangs,
+    about 30 % of the arm). Every rank aborts, whatever its program did, so teardown stays rank-symmetric."""
+    import torch.distributed as dist
+    import torch.distributed.distributed_c10d as c10d
+
+    for g in groups:
+        with suppress(Exception):
+            if backend == "nccl":
+                c10d._abort_process_group(g)
+            else:
+                dist.destroy_process_group(g)
+
+
 def _rank_main(rank, world, port, conn, cfg):
     fd = os.open(os.path.join(cfg["logdir"], f"rank{rank}.log"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
     os.dup2(fd, 2)
@@ -130,9 +145,7 @@ def _rank_main(rank, world, port, conn, cfg):
             pg = dist.new_group(list(range(world)), timeout=timedelta(seconds=timeout))
             status, env = interp.run_program(prog, rank, pg, timeout, device)
             res.update(status)
-            for g in env.created_groups + [pg]:
-                with suppress(Exception):
-                    dist.destroy_process_group(g)
+            teardown_groups(env.created_groups + [pg], backend)
         except Exception:  # noqa: BLE001
             res["executor_error"] = traceback.format_exc()[-2000:]
         if covs:

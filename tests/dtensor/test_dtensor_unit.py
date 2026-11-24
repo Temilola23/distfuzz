@@ -517,3 +517,14 @@ def test_cuda_filters_in_the_worker():
     assert not sticky.search("RuntimeError: aten.add_.Tensor: in-place operations that require placement changes")
     assert amb.search("v3.mode(0)") and amb.search("v1.topk(0)") and amb.search("torch.median(v2, 1)")
     assert not amb.search("v3.topk(2)") and not amb.search("v1.max()")
+
+
+def test_cuda_workers_do_not_inherit_nonblocking_nccl(monkeypatch):
+    from distfuzz.dtensor.world import NCCL_ENV, worker_env
+
+    monkeypatch.setenv("TORCH_NCCL_USE_COMM_NONBLOCKING", "1")
+    monkeypatch.setenv("TORCH_NCCL_NONBLOCKING_TIMEOUT", "6")
+    env = worker_env("cuda")
+    assert "TORCH_NCCL_USE_COMM_NONBLOCKING" not in env and "TORCH_NCCL_NONBLOCKING_TIMEOUT" not in env
+    assert all(env[k] == v for k, v in NCCL_ENV.items())
+    assert worker_env("cpu")["TORCH_NCCL_USE_COMM_NONBLOCKING"] == "1"  # gloo workers: environment untouched
