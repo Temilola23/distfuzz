@@ -27,7 +27,7 @@ class Script:
         return {"kind": "ok", "results": [{"sigs": sigs, "timeouts": n}]}
 
 
-def classify(prog, res):
+def classify(prog, res, **kw):
     r = res["results"][0]
     findings = [dict(kind=s.split("|")[0], sig=s, detail="") for s in r["sigs"]]
     return findings, {"ref": "valid", "timeouts": r["timeouts"]}

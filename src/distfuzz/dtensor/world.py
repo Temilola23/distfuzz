@@ -6,6 +6,9 @@ import subprocess
 import sys
 import time
 
+# see collectives.executor.NCCL_ENV: wait() raises after the group timeout instead of blocking the rank forever
+NCCL_ENV = {"TORCH_NCCL_BLOCKING_WAIT": "1", "TORCH_NCCL_ASYNC_ERROR_HANDLING": "1", "TORCH_NCCL_DUMP_ON_TIMEOUT": "0"}
+
 
 def free_port():
     s = socket.socket()
@@ -18,8 +21,10 @@ def free_port():
 class World:
     # loop_secs: a torch.distributed frame spinning this long is a hang (view_groups calls take microseconds);
     # coll_secs: a collective waiting this long is a hang, and must stay below the workers' 20 s Gloo timeout
-    def __init__(self, n, logdir, cov=True, startup_timeout=90, loop_secs=5.0, coll_secs=12.0, grace=3.0):
-        self.n, self.logdir, self.cov = n, logdir, cov
+    def __init__(self, n, logdir, cov=True, startup_timeout=90, loop_secs=5.0, coll_secs=12.0, grace=3.0, device="cpu"):
+        if device not in ("cpu", "cuda"):
+            raise ValueError(f"device must be cpu (gloo) or cuda (nccl), got {device}")
+        self.n, self.logdir, self.cov, self.device = n, logdir, cov, device
         self.startup_timeout = startup_timeout
         self.loop_secs, self.coll_secs, self.grace = loop_secs, coll_secs, grace
         self.procs = []
@@ -30,6 +35,8 @@ class World:
     def start(self):
         port = free_port()
         env = dict(os.environ, OMP_NUM_THREADS="1", PYTHONUNBUFFERED="1")
+        if self.device == "cuda":
+            env = {**NCCL_ENV, **env}
         self.procs = []
         for f in getattr(self, "_logs", []):
             f.close()
@@ -50,6 +57,8 @@ class World:
                     str(port),
                     "--cov",
                     str(int(self.cov)),
+                    "--device",
+                    self.device,
                 ],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,

@@ -159,3 +159,38 @@ FAULT_WEIGHTS = {
     "crash_rank": 3,
     "short_timeout_probe": 4,
 }
+
+BACKENDS = {"gloo": "cpu", "nccl": "cuda"}
+# Not generated with --backend nccl. Each would raise on every call and turn into a VALID_ERROR that says nothing
+# about NCCL, because the reference model follows Gloo.
+NCCL_EXCLUDED = {
+    "monitored_barrier": "Gloo only: ProcessGroupNCCL has no monitored barrier and raises",
+    "all_gather_coalesced": "ProcessGroupNCCL::allgather_coalesced raises NotImplementedError",
+}
+NCCL_EXCLUDED_REDOPS = {
+    "BAND": "NCCL has no bitwise reductions; ProcessGroupNCCL raises for ReduceOp.BAND",
+    "BOR": "NCCL has no bitwise reductions; ProcessGroupNCCL raises for ReduceOp.BOR",
+    "BXOR": "NCCL has no bitwise reductions; ProcessGroupNCCL raises for ReduceOp.BXOR",
+}
+# Generated, but the oracle treats them differently on NCCL (oracle.classify, backend="nccl"):
+NCCL_SEMANTICS = {
+    "no cross-rank checks": "NCCL does not compare op, root, dtype, shape or p2p tag across ranks, so a mismatched "
+    "call can complete with garbage or block until the timeout. SILENT_ACCEPT and HANG on a program the reference "
+    "calls invalid are counted in stats as nccl_unchecked, not reported.",
+    "input layout": "ProcessGroupNCCL rejects non-contiguous inputs with ValueError ('Tensors must be contiguous', "
+    "'... non-overlapping and dense') where the reference, following Gloo, expects the call to work. A program in "
+    "which a rank raised one of these is counted in nccl_rejected and gets no VALID_ERROR, HANG or value finding; "
+    "guard corruption is still reported. scatter, gather's output list and reduce_scatter_tensor do not check, so "
+    "they stay under the value oracle.",
+    "p2p tags": "ProcessGroupNCCL ignores tags; send/recv pairs match in issue order.",
+    "fault ops": "--fault is refused with nccl: abort, destroy and kill semantics differ and the reference has no "
+    "model of them.",
+    "async errors": "a collective that never completes does not raise by itself. The executor sets "
+    "TORCH_NCCL_BLOCKING_WAIT=1 so wait() raises after the per-group timeout, as Gloo does. It also sets "
+    "TORCH_NCCL_ASYNC_ERROR_HANDLING=1 as a fallback (PyTorch ignores it while blocking wait is on): if the watchdog "
+    "times out first it kills the rank, and a death whose log shows a watchdog timeout is classified as a hang. "
+    "Blocking wait does not cover the host-blocking NCCL calls (communicator split, first-use connection setup), "
+    "so communicators are non-blocking (TORCH_NCCL_USE_COMM_NONBLOCKING, executor.nccl_env). After a program with "
+    "an NCCL error or timeout the ranks are restarted. "
+    "The session kills and restarts ranks after 6 * timeout + 10 s in any case.",
+}

@@ -17,6 +17,7 @@ ap.add_argument("--rank", type=int)
 ap.add_argument("--world", type=int)
 ap.add_argument("--port", type=int)
 ap.add_argument("--cov", type=int, default=1)
+ap.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
 args = ap.parse_args()
 
 proto = os.fdopen(os.dup(1), "w", buffering=1)
@@ -40,7 +41,7 @@ torch._dynamo.config.accumulated_cache_size_limit = 4096
 
 COV_NEW: set[str] = set()
 TARGET = os.sep + os.path.join("torch", "distributed", "tensor") + os.sep
-if args.cov:
+if args.cov and hasattr(sys, "monitoring"):  # Python < 3.12 (some notebook images): run without coverage
     mon = sys.monitoring  # type: ignore[attr-defined]  # coverage needs Python 3.12+
     TOOL = 4
     mon.use_tool_id(TOOL, "dtfuzz")
@@ -56,17 +57,22 @@ if args.cov:
     mon.register_callback(TOOL, mon.events.LINE, _line)
     mon.set_events(TOOL, mon.events.LINE)
 
+DEVICE = args.device
+DEVICE_ID = torch.device("cuda", args.rank % torch.cuda.device_count()) if DEVICE == "cuda" else None
+if DEVICE_ID is not None:
+    torch.cuda.set_device(DEVICE_ID)
 dist.init_process_group(
-    "gloo",
+    "nccl" if DEVICE == "cuda" else "gloo",
     init_method=f"tcp://127.0.0.1:{args.port}",
     rank=args.rank,
     world_size=args.world,
     timeout=datetime.timedelta(seconds=20),
+    device_id=DEVICE_ID,
 )
 W = args.world
 # the 1-d mesh reuses the default PG; control-plane collectives on it can pair with a lagging DTensor collective
 SYNC_PG = dist.new_group(backend="gloo", timeout=datetime.timedelta(seconds=20))
-MESHES = {"1d": init_device_mesh("cpu", (W,))}
+MESHES = {"1d": init_device_mesh(DEVICE, (W,))}
 CUR = {"id": None}
 
 
@@ -76,9 +82,9 @@ def _emit_hang(rep):
 
 WD = Watchdog(_emit_hang, harness_groups=(SYNC_PG,))
 if W == 4:
-    MESHES["2d"] = init_device_mesh("cpu", (2, 2))
+    MESHES["2d"] = init_device_mesh(DEVICE, (2, 2))
 if W == 6:
-    MESHES["2d"] = init_device_mesh("cpu", (2, 3))
+    MESHES["2d"] = init_device_mesh(DEVICE, (2, 3))
 
 
 def norm_msg(e):
@@ -104,6 +110,34 @@ def thash(t):
 
 class Abort(Exception):
     pass
+
+
+# The CPU reference raises for an out-of-range index; the same index in a CUDA kernel is a device-side assert that
+# poisons the rank's context, and every later program on it fails (Kaggle run 1: 82 FATAL CUDA_ERROR_ASSERT and
+# about 48 restarts, all from generated out-of-range indices). On cuda such a step is not run on the DTensor side.
+REF_INDEX_ERR = re.compile(r"out of (range|bounds)|index -?\d+ is out of|IndexError")
+# After one of these the rank's CUDA context or NCCL communicator is unusable; the world must restart instead of
+# carrying the error into later steps and programs (69 "communicator was aborted" hits leaked in run 1).
+STICKY_ERR = re.compile(
+    r"CUDA error|device-side assert|AcceleratorError|DistBackendError|communicator was aborted|Watchdog caught"
+    r"|timed out in blocking wait"
+)
+# Ops whose result is not unique when values tie, or whose CPU reference is itself wrong on some layouts
+# (median of an expanded tensor, pytorch PR #203894). CPU and CUDA kernels may legitimately differ, so on cuda
+# only shape and dtype are compared.
+DEVICE_AMBIGUOUS = re.compile(r"\.mode\(|\.topk\(0\b|\bmedian\(|\bnanmedian\(")
+
+
+def sticky(e):
+    """On cuda, record a context/communicator-killing error as its own finding and abort the program."""
+    if DEVICE == "cuda" and e is not None and STICKY_ERR.search(f"{type(e).__name__}: {e}"):
+        kind = (
+            "NCCL_ERROR"
+            if re.search(r"DistBackendError|communicator|Watchdog|blocking wait", str(e))
+            else "CUDA_STICKY"
+        )
+        return kind
+    return None
 
 
 def check_value(tag, si, expr, rv, dv, findings, hashes):
@@ -163,6 +197,10 @@ def check_value(tag, si, expr, rv, dv, findings, hashes):
         err = e
         WD.err = norm_msg(e)
     flags = sync_flag(err is not None)
+    k = sticky(err)
+    if k:
+        findings.append(dict(kind=k, step=si, expr=expr + " [full_tensor]", msg=norm_msg(err)))
+        raise Abort()
     if any(flags) and not all(flags):
         findings.append(
             dict(
@@ -179,7 +217,11 @@ def check_value(tag, si, expr, rv, dv, findings, hashes):
             dict(kind=kind, step=si, expr=expr, msg=norm_msg(err), placements=str(dv.placements) if is_dt else "")
         )
         return True
-    d = compare(rv, full)
+    full = full.cpu()  # the reference ran on CPU
+    if DEVICE == "cuda" and DEVICE_AMBIGUOUS.search(expr):
+        d = None if (tuple(rv.shape), rv.dtype) == (tuple(full.shape), full.dtype) else "shape/dtype"
+    else:
+        d = compare(rv, full)
     if d is not None:
         findings.append(
             dict(kind=tag + "MISMATCH", step=si, expr=expr, msg=d, placements=str(dv.placements) if is_dt else "")
@@ -208,14 +250,21 @@ def run_program(prog):
                 rv = eval(expr, renv)
             except Exception as e:
                 rerr, rv = e, None
-            try:
-                dv = eval(expr, denv)
-            except Exception as e:
-                derr, dv = e, None
-                WD.err = norm_msg(e)
-                if os.environ.get("DTF_TB"):
-                    traceback.print_exc()
-            flags = sync_flag(derr is not None)
+            if DEVICE == "cuda" and rerr is not None and REF_INDEX_ERR.search(f"{type(rerr).__name__}: {rerr}"):
+                derr, dv = rerr, None
+            else:
+                try:
+                    dv = eval(expr, denv)
+                except Exception as e:
+                    derr, dv = e, None
+                    WD.err = norm_msg(e)
+                    if os.environ.get("DTF_TB"):
+                        traceback.print_exc()
+            flags = sync_flag(derr is not None)  # first, so a peer of a rank that aborts below is not left waiting
+            k = sticky(derr)
+            if k:
+                findings.append(dict(kind=k, step=si, expr=expr, msg=norm_msg(derr)))
+                raise Abort()
             if any(flags) and not all(flags):
                 findings.append(
                     dict(
@@ -235,7 +284,10 @@ def run_program(prog):
                 if expr.startswith("mk("):
                     findings.append(dict(kind="FUZZER_INPUT_ERR", step=si, expr=expr, msg=norm_msg(derr)))
                 elif not cascade:
-                    findings.append(dict(kind="DIST_ERR", step=si, expr=expr, msg=norm_msg(derr)))
+                    # a kernel CUDA lacks for this dtype ("... not implemented for 'Long'") says nothing about DTensor
+                    cuda_gap = DEVICE == "cuda" and "not implemented for" in str(derr)
+                    kind = "CUDA_UNSUPPORTED" if cuda_gap else "DIST_ERR"
+                    findings.append(dict(kind=kind, step=si, expr=expr, msg=norm_msg(derr)))
                 if mut:
                     return findings, hashes, False
                 continue

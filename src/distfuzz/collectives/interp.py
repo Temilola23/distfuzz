@@ -59,8 +59,8 @@ class Coverage:
 
 
 class RankEnv:
-    def __init__(self, rank, world, pg, timeout):
-        self.rank, self.world, self.pg, self.timeout = rank, world, pg, timeout
+    def __init__(self, rank, world, pg, timeout, device="cpu"):
+        self.rank, self.world, self.pg, self.timeout, self.device = rank, world, pg, timeout, device
         self.t = {}
         self.lists = {}
         self.groups = {}
@@ -82,7 +82,7 @@ class RankEnv:
         return self.t[v].view
 
     def mk(self, spec, s):
-        g = T.make(spec, self.rank, s)
+        g = T.make(spec, self.rank, s, self.device)
         self.all_guarded.append(g)
         return g
 
@@ -307,8 +307,15 @@ def _short(e):
     return (msg[0] if msg else "")[:400], "\n".join(msg[:12])[:3000]
 
 
-def run_program(p, rank, pg, timeout):
-    env = RankEnv(rank, p["world"], pg, timeout)
+def _host(x):
+    # results cross a pipe and are compared with the CPU reference; on CPU .cpu() returns the tensor itself
+    if isinstance(x, T.Guarded):
+        return x.view.detach().clone().cpu()
+    return x.detach().cpu() if isinstance(x, torch.Tensor) else x
+
+
+def run_program(p, rank, pg, timeout, device="cpu"):
+    env = RankEnv(rank, p["world"], pg, timeout, device)
     status = {"exc": None, "wait_exc": []}
     for i, c in enumerate(p["calls"]):
         try:
@@ -324,9 +331,7 @@ def run_program(p, rank, pg, timeout):
             w.wait()
         except Exception as e:  # noqa: BLE001
             status["wait_exc"].append({"type": type(e).__name__, "msg": _short(e)[0]})
-    outputs = {v: g.view.detach().clone().contiguous() for v, g in env.t.items()}
-    lists = {
-        v: [x.view.detach().clone() if isinstance(x, T.Guarded) else x for x in lst] for v, lst in env.lists.items()
-    }
+    outputs = {v: g.view.detach().clone().contiguous().cpu() for v, g in env.t.items()}
+    lists = {v: [_host(x) for x in lst] for v, lst in env.lists.items()}
     status.update(outputs=outputs, lists=lists, guard_bad=sum(not g.guards_ok() for g in env.all_guarded))
     return status, env

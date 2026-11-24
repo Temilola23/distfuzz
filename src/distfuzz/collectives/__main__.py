@@ -3,7 +3,8 @@ import json
 import os
 import time
 
-from .executor import CONFIRM_TIMEOUT, SIGNALS, TIMEOUT
+from .desc import BACKENDS
+from .executor import SIGNALS, TIMEOUT, check_backend
 
 
 def main():
@@ -12,8 +13,20 @@ def main():
     f = sub.add_parser("fuzz")
     f.add_argument("--mode", choices=["guided", "random"], default="guided")
     f.add_argument("--minutes", type=float, default=30)
-    f.add_argument("--world", type=int, default=4)
-    f.add_argument("--timeout", type=float, default=TIMEOUT)
+    f.add_argument("--world", "--world-size", dest="world", type=int, default=4)
+    f.add_argument("--backend", choices=sorted(BACKENDS), default="gloo")
+    f.add_argument("--device", choices=sorted(set(BACKENDS.values())), help="default: cpu for gloo, cuda for nccl")
+    f.add_argument(
+        "--cross-backend",
+        choices=sorted(BACKENDS),
+        help="also run every program on this backend and report where the two disagree (XBACKEND_* findings)",
+    )
+    f.add_argument("--cross-timeout", type=float, default=2.0, help="per-collective timeout on the --cross-backend")
+    f.add_argument(
+        "--timeout",
+        type=float,
+        help=f"per-collective timeout; default {TIMEOUT} on gloo, executor.NCCL_TIMEOUT on nccl",
+    )
     f.add_argument("--seed", type=int, default=0)
     f.add_argument("--detail", action="store_true")
     f.add_argument("--fault", action="store_true", help="also generate fault and lifecycle ops")
@@ -34,8 +47,8 @@ def main():
     f.add_argument(
         "--confirm-timeout",
         type=float,
-        default=CONFIRM_TIMEOUT,
-        help="re-run new findings that involved a timeout at this timeout and drop those that do not recur; 0 = off",
+        help="re-run new findings that involved a timeout at this timeout and drop those that do not recur; 0 = off. "
+        "Default 4 on gloo, 15 on nccl",
     )
     f.add_argument("--out", required=True)
     c = sub.add_parser("campaign", help="fuzz in rounds that alternate random and guided; resumable")
@@ -67,6 +80,13 @@ def main():
     if a.cmd == "fuzz":
         from .fuzzer import Fuzzer
 
+        a.device = a.device or BACKENDS[a.backend]
+        try:
+            check_backend(a.backend, a.device)
+            if a.fault and "nccl" in (a.backend, a.cross_backend):
+                raise ValueError("--fault is not supported with nccl (desc.NCCL_SEMANTICS)")
+        except ValueError as e:
+            ap.error(str(e))
         fz = Fuzzer(
             a.out,
             mode=a.mode,
@@ -81,6 +101,10 @@ def main():
             diverge_weight=a.diverge_weight,
             gen_diverge=a.gen_diverge,
             confirm_timeout=a.confirm_timeout,
+            backend=a.backend,
+            device=a.device,
+            cross=a.cross_backend,
+            cross_timeout=a.cross_timeout,
         )
         print(json.dumps(fz.run(a.minutes * 60)))
     elif a.cmd == "campaign":

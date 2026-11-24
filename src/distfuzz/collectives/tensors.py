@@ -63,21 +63,21 @@ class Guarded:
         return bool((self.base[: self.lo] == gv).all()) and bool((self.base[self.hi :] == gv).all())
 
 
-def make(spec, rank: int, salt: int = 0) -> Guarded:
+def make(spec, rank: int, salt: int = 0, device="cpu") -> Guarded:
     dt = DTYPES[spec["dtype"]]
     shape = list(spec["shape"])
     layout = spec.get("layout", "contig")
     vals = fill_values(spec, rank, salt)
     n = math.prod(shape)
     if layout == "noncontig" and len(shape) >= 2:
-        base = torch.full((n + 2 * GUARD,), guard_value(dt), dtype=dt)
+        base = torch.full((n + 2 * GUARD,), guard_value(dt), dtype=dt, device=device)
         view = base[GUARD : GUARD + n].view(shape[:-2] + [shape[-1], shape[-2]]).transpose(-1, -2)
         view.copy_(vals)
         return Guarded(base, view, GUARD, GUARD + n)
     if layout == "noncontig":
         # gaps between strided elements keep the sentinel but only the outer guards are checked
         storage_n = max(2 * n, 1)
-        base = torch.full((storage_n + 2 * GUARD,), guard_value(dt), dtype=dt)
+        base = torch.full((storage_n + 2 * GUARD,), guard_value(dt), dtype=dt, device=device)
         inner = base[GUARD : GUARD + storage_n]
         view = inner[::2][:n].view(shape) if len(shape) else inner[0:1].view(())
         view.copy_(vals)
@@ -85,12 +85,12 @@ def make(spec, rank: int, salt: int = 0) -> Guarded:
     if layout == "expanded" and n > 0 and len(shape) >= 1:
         row_shape = [1] + shape[1:]
         rn = math.prod(row_shape)
-        base = torch.full((rn + 2 * GUARD,), guard_value(dt), dtype=dt)
+        base = torch.full((rn + 2 * GUARD,), guard_value(dt), dtype=dt, device=device)
         row = base[GUARD : GUARD + rn].view(row_shape)
         row.copy_(vals[:1])
         return Guarded(base, row.expand(shape), GUARD, GUARD + rn)
     off = 3 if layout == "offset" else 0
-    base = torch.full((n + off + 2 * GUARD,), guard_value(dt), dtype=dt)
+    base = torch.full((n + off + 2 * GUARD,), guard_value(dt), dtype=dt, device=device)
     view = base[GUARD + off : GUARD + off + n].view(shape)
     view.copy_(vals)
     return Guarded(base, view, GUARD, GUARD + off + n)

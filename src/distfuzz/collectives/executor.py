@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import faulthandler
+import math
 import multiprocessing as mp
 import os
+import re
+import signal
 import socket
 import sys
 import tempfile
@@ -10,6 +14,8 @@ import traceback
 from contextlib import suppress
 from multiprocessing.connection import wait as conn_wait
 
+from .desc import BACKENDS
+
 # written to each rank's log before every program, so a crash is read from its own program's output only
 MARK = "@@ distfuzz program"
 # per-collective. Measured cross-rank arrival skew is <= 0.12 s (FINDINGS.md); a call that raises on some ranks
@@ -17,6 +23,41 @@ MARK = "@@ distfuzz program"
 TIMEOUT = 0.5
 # a new finding that involved a timeout must reproduce at this one before it is reported (Fuzzer.confirm)
 CONFIRM_TIMEOUT = 4.0
+# NCCL sets up a communicator per new group (and per p2p pair on first use) and a cold kernel launch is slow; 0.5 s
+# would time out healthy collectives. Not measured on T4 yet: the notebook's calibration cell checks it.
+NCCL_TIMEOUT = 3.0
+NCCL_CONFIRM_TIMEOUT = 15.0
+# set before torch is imported in a rank (desc.NCCL_SEMANTICS, "async errors")
+NCCL_ENV = {
+    "TORCH_NCCL_BLOCKING_WAIT": "1",
+    "TORCH_NCCL_ASYNC_ERROR_HANDLING": "1",
+    "TORCH_NCCL_DUMP_ON_TIMEOUT": "0",
+    "TORCH_NCCL_ENABLE_MONITORING": "1",
+    "TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC": "60",
+    # Blocking wait only bounds Work.wait(). The first collective on a communicator (and the first p2p to a peer)
+    # connects inside ncclGroupEnd, and new_group splits the world communicator; both block the host until every
+    # peer arrives, so a desynchronised program sat there until the session deadline (Kaggle run 1: 97 of 748
+    # programs, ~85% of the hour). Non-blocking communicators make PyTorch poll those calls and give up after
+    # TORCH_NCCL_NONBLOCKING_TIMEOUT (set per session from the collective timeout). Opt out with
+    # DISTFUZZ_NCCL_NONBLOCKING=0 (pytorch#153960: a non-blocking hang in NCCL 2.26).
+    "TORCH_NCCL_USE_COMM_NONBLOCKING": "1",
+}
+
+
+def nccl_env(timeout):
+    env = dict(NCCL_ENV, TORCH_NCCL_NONBLOCKING_TIMEOUT=str(max(2, math.ceil(2 * timeout))))
+    if os.environ.get("DISTFUZZ_NCCL_NONBLOCKING") == "0":
+        env.pop("TORCH_NCCL_USE_COMM_NONBLOCKING")
+        env.pop("TORCH_NCCL_NONBLOCKING_TIMEOUT")
+    return env
+
+
+# an NCCL error or timeout leaves the communicators (and possibly in-flight kernels) in an undefined state; PyTorch's
+# own message says later GPU work "might run on corrupted/incomplete data". Ranks are restarted after such a program.
+NCCL_DIRTY = re.compile(
+    r"DistBackendError|NCCL error|ncclInternalError|ncclSystemError|communicator was aborted|timed out|timing out"
+    r"|Timed out|Watchdog"
+)
 
 
 def _free_port():
@@ -31,11 +72,20 @@ def _rank_main(rank, world, port, conn, cfg):
     fd = os.open(os.path.join(cfg["logdir"], f"rank{rank}.log"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
     os.dup2(fd, 2)
     os.dup2(fd, 1)
+    # Python stacks on a fatal signal, and on SIGUSR1 (sent by Session.run before it kills a stuck rank): without
+    # them the run's SIGSEGV and hang findings had empty logs
+    faulthandler.enable(all_threads=True)
+    if hasattr(signal, "SIGUSR1"):
+        faulthandler.register(signal.SIGUSR1, all_threads=True)
     os.environ.update(
         MASTER_ADDR="127.0.0.1", MASTER_PORT=str(port), GLOO_SOCKET_IFNAME="lo0" if sys.platform == "darwin" else "lo"
     )
     if cfg.get("detail"):
         os.environ["TORCH_DISTRIBUTED_DEBUG"] = "DETAIL"
+    backend, device = cfg.get("backend", "gloo"), cfg.get("device", "cpu")
+    if backend == "nccl":
+        for k, v in nccl_env(cfg["timeout"]).items():
+            os.environ.setdefault(k, v)
     import warnings
 
     warnings.filterwarnings("ignore")
@@ -49,9 +99,16 @@ def _rank_main(rank, world, port, conn, cfg):
     from . import interp
 
     timeout = cfg["timeout"]
-    dist.init_process_group("gloo", rank=rank, world_size=world, timeout=timedelta(seconds=max(timeout, 10)))
+    dev = None
+    if device == "cuda":
+        dev = torch.device("cuda", rank % torch.cuda.device_count())
+        torch.cuda.set_device(dev)
+    # device_id makes NCCL init eagerly, so new_group can split the world communicator instead of creating one
+    dist.init_process_group(
+        backend, rank=rank, world_size=world, timeout=timedelta(seconds=max(timeout, 10)), device_id=dev
+    )
     covs = []
-    if "py" in cfg["signals"]:
+    if "py" in cfg["signals"] and hasattr(sys, "monitoring"):  # Python < 3.12 (some notebook images): no coverage
         covs.append(interp.Coverage())
     if "cxx" in cfg["signals"]:
         from .cxxcov import CxxCoverage
@@ -71,7 +128,7 @@ def _rank_main(rank, world, port, conn, cfg):
             # resync the group-name counter so a desynchronised new_group() in an earlier program can't leak
             c10d._world.group_count = 1_000_000 + nprog * 1000
             pg = dist.new_group(list(range(world)), timeout=timedelta(seconds=timeout))
-            status, env = interp.run_program(prog, rank, pg, timeout)
+            status, env = interp.run_program(prog, rank, pg, timeout, device)
             res.update(status)
             for g in env.created_groups + [pg]:
                 with suppress(Exception):
@@ -99,10 +156,38 @@ def signals(coverage):
     return set(coverage.split("+"))
 
 
+def check_backend(backend, device):
+    if BACKENDS.get(backend) != device:
+        raise ValueError(f"supported backend/device pairs are {BACKENDS}, got {backend}/{device}")
+
+
+# a CUDA error poisons the rank's context: every later program would fail the same way
+CUDA_STICKY = ("CUDA error", "device-side assert", "illegal memory access")
+
+
+def _errors(r):
+    r = r or {}
+    return f"{r.get('exc')} {r.get('wait_exc')} {r.get('executor_error')}"
+
+
 class Session:
-    def __init__(self, world=4, timeout=TIMEOUT, detail=False, coverage=True, logdir=None, hang_deadline=None):
+    def __init__(
+        self,
+        world=4,
+        timeout=TIMEOUT,
+        detail=False,
+        coverage=True,
+        logdir=None,
+        hang_deadline=None,
+        backend="gloo",
+        device="cpu",
+    ):
+        check_backend(backend, device)
         self.world = world
+        self.backend, self.device = backend, device
         self.cfg = dict(
+            backend=backend,
+            device=device,
             timeout=timeout,
             detail=detail,
             signals=signals(coverage),
@@ -168,7 +253,7 @@ class Session:
             c.close()
         self.started = False
 
-    def _log_tails(self, ranks):
+    def _log_tails(self, ranks, keep=8):
         d = self.cfg["logdir"]
         time.sleep(0.2)
         out = []
@@ -182,8 +267,8 @@ class Session:
                 if MARK in log:
                     log = log.rsplit(MARK, 1)[1].split("\n", 1)[-1]
                 tail = log.splitlines()
-                keep = [ln for ln in tail if "Warning" not in ln and "warn(" not in ln][-8:]
-                out.append(f"[rank {r}] " + " | ".join(keep))
+                lines = [ln for ln in tail if "Warning" not in ln and "warn(" not in ln][-keep:]
+                out.append(f"[rank {r}] " + " | ".join(lines))
             except OSError:
                 pass
         return "\n".join(out)
@@ -251,15 +336,31 @@ class Session:
             "stuck_ranks": sorted(pending.values()) if kind != "ok" else [],
         }
         if kind == "crash":
-            out["crash_log"] = self._log_tails([r for r in range(self.world) if (results[r] or {}).get("died")])
+            out["crash_log"] = self._log_tails([r for r in range(self.world) if (results[r] or {}).get("died")], 30)
             out["exitcodes"] = [p.exitcode for p in self.procs]
-        if kind != "ok":
+        if kind == "hang":
+            out["hang_log"] = self._dump_stacks(out["stuck_ranks"])
+        if kind == "ok" and self.device == "cuda" and any(s in _errors(r) for r in results for s in CUDA_STICKY):
+            out["cuda_sticky"] = True
+        if kind == "ok" and self.backend == "nccl" and any(NCCL_DIRTY.search(_errors(r)) for r in results):
+            out["nccl_dirty"] = True
+        if kind != "ok" or out.get("cuda_sticky") or out.get("nccl_dirty"):
             self.restart()
         return out
 
+    def _dump_stacks(self, ranks):
+        """Ask the stuck ranks for their Python stacks (faulthandler on SIGUSR1) and return the log tails."""
+        if not hasattr(signal, "SIGUSR1"):
+            return ""
+        for r in ranks:
+            with suppress(Exception):
+                os.kill(self.procs[r].pid, signal.SIGUSR1)
+        time.sleep(1.0)
+        return self._log_tails(ranks, 40)
 
-def run_once(prog, world=4, timeout=TIMEOUT, detail=False, coverage=False, logdir=None):
-    s = Session(world, timeout, detail, coverage, logdir)
+
+def run_once(prog, world=4, timeout=TIMEOUT, detail=False, coverage=False, logdir=None, backend="gloo", device="cpu"):
+    s = Session(world, timeout, detail, coverage, logdir, backend=backend, device=device)
     s.start()
     try:
         return s.run(prog)

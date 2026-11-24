@@ -469,3 +469,51 @@ def test_opname_torch_ops_namespace():
     assert opname("torch.ops.aten._safe_softmax(v1, 0)") == "_safe_softmax"
     assert opname("torch.ops.prims.view_of(v0)") == "view_of"
     assert opname("torch.ops.aten.norm.ScalarOpt_dim(v1, 2, [0])") == "norm"
+
+
+def test_signature_names_a_non_gloo_backend():
+    f = dict(kind="MISMATCH", step=1, expr="v1.sum(0)", msg="values differ at [[0]]")
+    assert signature(f, "nccl") == "nccl:" + signature(f) and not signature(f).startswith("gloo")
+
+
+def test_world_refuses_an_unknown_device(tmp_path):
+    from distfuzz.dtensor.world import World
+
+    with pytest.raises(ValueError):
+        World(2, str(tmp_path), device="mps")
+
+
+def _worker_regexes():
+    """The cuda-only filters in worker.py, read without importing it (importing starts a process group)."""
+    import ast
+    import pathlib
+    import re
+
+    src = pathlib.Path(__file__).parents[2] / "src/distfuzz/dtensor/worker.py"
+    out = {}
+    for node in ast.parse(src.read_text()).body:
+        if (
+            isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Call)
+            and getattr(node.value.func, "attr", "") == "compile"
+        ):
+            name = node.targets[0].id
+            out[name] = re.compile(ast.literal_eval(node.value.args[0]))
+    return out
+
+
+def test_cuda_filters_in_the_worker():
+    rx = _worker_regexes()
+    idx, sticky, amb = rx["REF_INDEX_ERR"], rx["STICKY_ERR"], rx["DEVICE_AMBIGUOUS"]
+    assert idx.search("IndexError: index 5 is out of bounds for dimension 0 with size 3")
+    assert idx.search("RuntimeError: index_add_(): Index out of range")
+    assert not idx.search("RuntimeError: shape '[2]' is invalid for input of size 3")
+    for m in [
+        "AcceleratorError: CUDA error: device-side assert triggered",
+        "DistBackendError: NCCL communicator was aborted on rank 1.",
+        "DistBackendError: [Rank 0] Watchdog caught collective operation timeout",
+    ]:
+        assert sticky.search(m)
+    assert not sticky.search("RuntimeError: aten.add_.Tensor: in-place operations that require placement changes")
+    assert amb.search("v3.mode(0)") and amb.search("v1.topk(0)") and amb.search("torch.median(v2, 1)")
+    assert not amb.search("v3.topk(2)") and not amb.search("v1.max()")
