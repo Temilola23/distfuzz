@@ -47,10 +47,25 @@ def is_pp(seg):
     return seg.get("par") in ("pp", "pp_fsdp")
 
 
+def float8_ok(device):
+    """torchao float8 training: torch._scaled_mm has a CPU kernel; on CUDA it needs compute capability 8.9+."""
+    if not HAVE_AO:
+        return False
+    if device != "cuda":
+        return True
+    import torch
+
+    return torch.cuda.get_device_capability() >= (8, 9)
+
+
 class TrainGen(Gen):
-    def __init__(self, rng, max_w=4):
+    def __init__(self, rng, max_w=4, device="cpu"):
         super().__init__(rng, max_w=max_w)
         self.names = sorted(TEMPLATES)
+        self.f8_ok = float8_ok(device)
+        # under cuda the workers' groups are NCCL-only (Gloo init segfaulted on the Kaggle image), and a thread
+        # async_save needs a CPU backend: every such save failed in GPU run 1 (97 signatures), so none are generated
+        self.async_ok = device != "cuda"
 
     # model --------------------------------------------------------------------------------------------------
     def attn(self, d):
@@ -276,6 +291,14 @@ class TrainGen(Gen):
 
     # checkpoint ---------------------------------------------------------------------------------------------
     def gen_save(self, scn, seg, nxt):
+        sv = self._gen_save(scn, seg, nxt)
+        if not self.async_ok:
+            sv["async"] = "none"
+            sv.pop("mutate", None)
+            sv.pop("async_pg", None)
+        return sv
+
+    def _gen_save(self, scn, seg, nxt):
         r = self.r
         tp = TEMPLATES[scn["tmpl"]]
         sv = Gen.gen_save(self, scn, seg, nxt)
@@ -351,7 +374,7 @@ class TrainGen(Gen):
         scn["ac"] = r.choice(tp["ac"])
         scn["named_opt"] = r.random() < tp.get("named_opt", 0.0)
         scn["f8"] = None
-        if HAVE_AO and r.random() < tp.get("f8", 0.0):
+        if self.f8_ok and r.random() < tp.get("f8", 0.0):
             scn["f8"] = dict(ag=r.random() < 0.7, precompute=r.random() < 0.7)
         scn["compile"] = None
         if r.random() < tp.get("compile", 0.0):
@@ -444,6 +467,8 @@ class TrainGen(Gen):
             sv = s.get("save", {})
             if sv.get("async") == "thread" and sv.get("async_pg") != "new":
                 return False
+            if sv.get("async", "none") != "none" and not self.async_ok:
+                return False
         return True
 
     def valid_v2(self, scn):
@@ -451,6 +476,8 @@ class TrainGen(Gen):
         cc = scn.get("clip")
         f8 = scn.get("f8")
         if f8:
+            if not self.f8_ok:
+                return False
             if scn["dtype"] != "f32" or (f8.get("precompute") and not f8.get("ag")):
                 return False
             if any(s["par"] not in ("fsdp", "hsdp", "ddp") or s.get("mp") for s in scn["segs"]):

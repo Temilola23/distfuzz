@@ -325,3 +325,29 @@ def test_cross_mode_end_to_end_two_gloo_sessions_agree(tmp_path):
         fz.sess.stop(hard=True)
         fz.sess2.stop(hard=True)
         fz.pool.shutdown()
+
+
+def test_unconfirmed_nccl_crash_keeps_its_crash_log(tmp_path):
+    import json
+
+    log = "Fatal Python error: Segmentation fault\n  File x.py, line 7 in all_reduce"
+    crash = {"kind": "crash", "results": [{"died": True}, None], "exitcodes": [-11, 0], "crash_log": log}
+    fz = Fuzzer(str(tmp_path), mode="random", world=2, backend="nccl")
+    fz.sess, fz.t0 = Restartable(crash, ok_run(VALID)), 0.0
+    fz.execute(VALID)
+    rec = json.loads((tmp_path / "unconfirmed.jsonl").read_text())
+    assert rec["fresh"] and rec["sig"].startswith("nccl:CRASH") and rec["crash_log"] == log
+
+
+@pytest.mark.parametrize("backend,aborted", [("nccl", True), ("gloo", False)])
+def test_program_groups_are_aborted_on_nccl_and_destroyed_on_gloo(monkeypatch, backend, aborted):
+    import torch.distributed as dist
+    import torch.distributed.distributed_c10d as c10d
+
+    from distfuzz.collectives.executor import teardown_groups
+
+    calls = []
+    monkeypatch.setattr(c10d, "_abort_process_group", lambda g: calls.append(("abort", g)))
+    monkeypatch.setattr(dist, "destroy_process_group", lambda g: calls.append(("destroy", g)))
+    teardown_groups(["sub", "pg"], backend)
+    assert calls == [("abort" if aborted else "destroy", g) for g in ("sub", "pg")]

@@ -6,6 +6,8 @@ import subprocess
 import sys
 import time
 
+from distfuzz.dtensor.world import worker_env
+
 
 def free_port():
     s = socket.socket()
@@ -51,10 +53,6 @@ def stack_location(txt):
     return " > ".join(x for x in (api, inner) if x)
 
 
-# NCCL: wait() raises after the group timeout instead of blocking forever (as in the collectives fuzzer)
-NCCL_ENV = {"TORCH_NCCL_BLOCKING_WAIT": "1", "TORCH_NCCL_ASYNC_ERROR_HANDLING": "1", "TORCH_NCCL_DUMP_ON_TIMEOUT": "0"}
-
-
 class World:
     def __init__(self, n, logdir, cov=True, startup_timeout=90, device="cpu"):
         self.n, self.logdir, self.cov, self.device = n, logdir, cov, device
@@ -73,9 +71,7 @@ class World:
 
     def start(self):
         port = free_port()
-        env = dict(os.environ, OMP_NUM_THREADS="1", PYTHONUNBUFFERED="1")
-        if self.device == "cuda":
-            env.update(NCCL_ENV)
+        env = worker_env(self.device)
         self.procs = []
         for r in range(self.n):
             log = open(os.path.join(self.logdir, f"rank{r}.log"), "a")
