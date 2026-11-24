@@ -1,356 +1,141 @@
 # distfuzz
 
-Fuzzers for the distributed layer of PyTorch: `torch.distributed` collectives on Gloo, DTensor sharding, and distributed checkpointing (DCP). The design follows [syzkaller](https://github.com/google/syzkaller): programs are generated from typed API descriptions, run on a persistent set of worker ranks, judged by oracles, deduplicated, minimized and turned into standalone repros.
+distfuzz checks whether PyTorch's distributed stack computes the same thing as a single process. You give it a PyTorch build; it generates distributed programs and whole training runs (FSDP2, tensor and pipeline parallel, HSDP, DDP, expert parallel, distributed checkpoints, `torch.compile`), runs each one on several ranks, and compares every value, gradient and checkpoint with the same computation on one process. When they differ, it shrinks the case to a few lines and writes a standalone PyTorch script you can run, share or attach to a bug report. So far it has found 44 verified bugs in PyTorch 2.14.0; for 34 of them a search of the PyTorch tracker found no earlier report.
 
-This is a capstone research prototype. It has found bugs that still reproduce on the latest PyTorch release and on a nightly build (table below). It is not yet a research-grade fuzzer; see [Status](#status).
+Documentation: [temilola23.github.io/distfuzz](https://temilola23.github.io/distfuzz/) (the same pages are in [`docs/`](docs/)).
 
 ## Why
 
-Distributed training bugs rarely crash. They show up as a wrong gradient on one rank, a desync that turns into a timeout ten minutes later, or a checkpoint that loads without error and silently restores nothing. Upstream tests for this layer mostly use evenly divisible shapes, one placement at a time, and a single mesh. distfuzz goes after the space those tests skip: uneven and empty shards, `Partial` placements, strided views, in-place ops, rank-divergent programs, and reloading checkpoints under a different world size and parallelism.
+Bugs in distributed training rarely crash. A gradient comes back too large on every rank, or a checkpoint loads without an error on one rank and restores nothing there. Loss curves can still look plausible, so the framework is often the last thing anyone suspects.
 
-Each fuzzer is differential. It runs the same program twice, once through the distributed API and once through a single-process reference, and reports any difference.
+Here is one. `F.mse_loss` on a sharded DTensor gives the right loss and twice the right gradient on 2 ranks:
 
-## Components
-
-| Package | Target | Oracle |
-|---|---|---|
-| `distfuzz.collectives` | c10d collectives and p2p on Gloo (28 calls described), with per-rank divergence and uneven shapes | A single-process model of all ranks predicts every tensor on every rank. Sentinel cells around each buffer catch writes outside a view. Also: crash, hang, error on a valid program, silent acceptance of an invalid one. |
-| `distfuzz.collectives --fault` | Lifecycle and fault ops on top of the above: drop a `Work` before `wait()`, wait twice, destroy or abort a group, resize or free a tensor while an async collective uses it, SIGKILL a rank mid-collective | Crash and hang oracles only. A rank the program kills on purpose is expected to die; a surviving rank that dies with SIGSEGV or SIGABRT is a finding. Crash findings keep the programs that ran before them, and `replay` trims that history. |
-| `distfuzz.dtensor` | DTensor ops (about 150 templates, Shard/Replicate/Partial on 1-D and 2-D meshes, autograd, `torch.compile`) | `full_tensor()` must equal the same program on plain tensors; also shapes, local shard shapes, gradients, and whether all ranks raise the same error. A per-rank watchdog names each hang by where the ranks are stuck: a DTensor loop and its branch (`HANG\|cpu\|_view_ops.py:view_groups:src_exhausted`), or a collective and the ranks missing from it. |
-| `distfuzz.compile` | `torch.compile` (aot_eager, inductor) over the DTensor programs above, and over small FSDP2 / TP / FSDP2+TP models trained for a few steps | Each program runs four ways: plain tensors, eager DTensor, compiled plain tensors and compiled DTensor. A finding is a difference the compiled DTensor run adds over eager DTensor that the compiled plain-tensor run does not show: wrong values or gradients, wrong output dtype, placement or local shape, a compile error on a program eager runs, an error on some ranks only, a hang, recompiles on identical inputs. See [Compile-path fuzzing](#compile-path-fuzzing). |
-| `distfuzz.dcp` | `torch.distributed.checkpoint` save/load and `get_state_dict`/`set_state_dict` across FSDP2, TP, HSDP, DDP and 2-D meshes | Checkpoints are reloaded into a poisoned model under a different world size and parallelism; loaded state must match saved state bitwise, and training must match an unsharded reference. |
-| `distfuzz.dcp --profile train` | Whole training steps as production stacks run them: forward, backward, gradient clipping with every `norm_type`, optimizer step, accumulation, checkpoint and resume on a different layout, LoRA, MoE with expert parallelism | The same single-process reference per step (loss, gradient norm, parameters, optimizer state), plus hang location per rank, errors on some ranks only, rank divergence and checkpoint round trips. See [Training profile](#training-profile). |
-| `distfuzz.repro` | Any finding or repro script | syzbot-style bundle: reliability over N fresh containers, bisection across 11 releases (2.4.1 to 2.14.0) and a pinned nightly, pinned Dockerfile, report, dashboard. |
-
-## Key terms
-
-| Term | Meaning here |
-|---|---|
-| Rank | One process in a distributed job. A run with world size 4 has ranks 0 to 3. |
-| Collective | A call every rank makes together, such as `all_reduce` (every rank contributes a tensor and gets back the sum). |
-| Gloo | PyTorch's CPU backend for collectives. NCCL is the GPU backend and is out of scope here. |
-| Process group | The set of ranks a collective runs over. `new_group` and `new_subgroups` create smaller ones. |
-| DTensor | A tensor split ("sharded") across ranks. Placements say how: `Shard(d)` splits dim `d`, `Replicate()` copies it, `Partial(op)` holds unreduced pieces. |
-| DCP | `torch.distributed.checkpoint`: saves a sharded model and loads it back, possibly onto a different layout. |
-| Program | A short list of API calls, run on every rank, that the fuzzer generates and executes. Stored as JSON. |
-| Description | The table entry for one API call: its argument types, what it returns and how often to pick it (`collectives/desc.py`). |
-| Oracle | What decides whether a result is wrong. Here, an independent computation of the correct answer. |
-| Reference model | The single-process oracle for collectives: it computes what every rank should hold after every call. |
-| Finding | Anything the oracle flags: a wrong value, a hang, a crash, a rank desync, an unexpected error. Saved as JSON with its program. |
-| Signature | A short key that groups findings of the same kind, e.g. `WRONG_RESULT\|all_reduce\|torch.int64`. |
-| Corpus | Programs kept because they reached new code. Guided mode mutates them; random mode does not keep any. |
-| Minimize | Shrink a failing program, with delta debugging, to the fewest calls that still fail. |
-| Repro | A standalone PyTorch script, with no distfuzz imports, that shows one bug. |
-| Bundle | A folder per bug with the repro, a pinned Dockerfile, a 20-run reliability result and a per-release bisection table. |
-
-## How it maps to syzkaller
-
-| syzkaller | distfuzz | Gap |
-|---|---|---|
-| syzlang descriptions, typed resources | `collectives/desc.py` (resources `tensor`, `group`, `work`, `list`); `dtensor/gen.py` op templates | A Python table, not a language; no extraction from docs or OpInfo |
-| `prog/` generation and mutation | `prog.py`, `gen.py`: insert, remove, mutate argument, splice, plus `diverge` (one rank skips or changes a call) | No learned choice table (`prog/prio.go`) |
-| executor with fork server | Persistent rank processes, fresh process group per program, restart on hang or crash; about 17x faster than a fresh world per program | One session at a time |
-| kcov coverage | `sys.monitoring` line coverage of `torch/distributed`; with `--signal cxx`, SanitizerCoverage edge counters in Gloo and c10d from an instrumented build (`docker/Dockerfile.cov`) | C++ coverage needs the 1-2 hour source build; background threads produce about 2,400 noise features, calibrated away at start |
-| KASAN | GUARD sentinel oracle; differential reference models | No sanitizer build of Gloo or c10d yet |
-| `pkg/repro`, `pkg/bisect`, syzbot dashboard | ddmin minimizers, `distfuzz.repro` (reliability, release bisection, static dashboard) | Release-level bisection only, no commit bisection |
-
-## Architecture
-
-The loop is the same for the three fuzzers; the collectives fuzzer is shown. DTensor and DCP replace the reference with a plain-tensor or unsharded run of the same program on the ranks themselves.
-
-```mermaid
-flowchart TB
-    D[API description] --> G[generator / mutator]
-    K[(corpus)] --> G
-    G -->|program| REF[single-process reference]
-    G -->|program| W
-    subgraph W["N persistent ranks, Gloo over TCP"]
-        direction LR
-        R0[rank 0] ~~~ R1[rank 1] ~~~ RN[rank N-1]
-    end
-    REF -->|expected values; valid, invalid or uncertain| O[oracle]
-    W -->|outputs, exceptions, coverage, exit codes| O
-    O -->|new coverage| K
-    O -->|new signature| F[(findings)]
-    F --> MIN[ddmin minimizer] --> RP[standalone repro.py]
-    RP --> B[distfuzz.repro: reliability, bisection, bundle]
+```python
+# torchrun --nproc-per-node 2 examples/repros/dtensor/mse_loss_grad.py
+x, y = torch.tensor([2.0, 1.0]), torch.tensor([5.0, -1.0])
+x2 = distribute_tensor(x, mesh, [Shard(0)]).requires_grad_()
+F.mse_loss(x2, distribute_tensor(y, mesh, [Shard(0)])).backward()
 ```
 
-### The three fuzzers side by side
-
-All three share the loop above. What changes is what a program contains and what the oracle compares.
-
-```mermaid
-flowchart LR
-    subgraph C["collectives"]
-        C1["program: tensors + c10d calls<br/>(all_reduce, broadcast, p2p, groups, waits)"] --> C2["oracle: single-process reference model<br/>+ sentinel cells around each view"]
-    end
-    subgraph D["dtensor"]
-        D1["program: DTensor ops on a 1-D or 2-D mesh<br/>with Shard / Replicate / Partial placements"] --> D2["oracle: same program on plain tensors;<br/>full_tensor() must match"]
-    end
-    subgraph P["dcp"]
-        P1["scenario: model + parallelism (FSDP2, TP, HSDP, DDP)<br/>save, then load on the same or another layout"] --> P2["oracle: reload into a poisoned model;<br/>restored state must equal the original"]
-    end
+```
+loss   6.5 6.5
+grad   [-3.0, 2.0] [-6.0, 4.0]
 ```
 
-### From a finding to a report
+The first value on each line is from one process, the second from the sharded run. The gradient is multiplied by the world size, on torch 2.14.0 and on the November 2026 nightly, with no error or warning. distfuzz found it by comparing every gradient with a single-process run.
 
-```mermaid
-flowchart LR
-    F["finding JSON<br/>(program + what went wrong)"] --> M["minimize<br/>(ddmin: drop calls, simplify args)"]
-    M --> R["repro.py<br/>(plain PyTorch, runs under torchrun)"]
-    R --> REL["reliability<br/>(20 runs in fresh containers)"]
-    R --> BIS["bisection<br/>(each release 2.4.1 to 2.14.0 + nightly)"]
-    REL --> B[("bundle/<br/>repro.py, Dockerfile, run.sh,<br/>bundle.json, REPORT.md, report.html")]
-    BIS --> B
-    B --> DASH["bundles/index.html<br/>(dashboard of every bug)"]
-```
+## Install
 
-## Reading the output
-
-**Fuzzer progress line** (collectives), printed every 30 seconds:
-
-```
-[random] t=31.2s execs=179 exec/s=5.74 cover=1156 corpus=0 findings=12 hang=0 crash=1 oom=0 checked=103
-```
-
-| Field | Meaning |
-|---|---|
-| `execs` | programs run so far |
-| `exec/s` | programs per second, end to end |
-| `cover` | distinct lines of `torch/distributed` Python code reached so far |
-| `corpus` | programs kept for mutation (always 0 in random mode) |
-| `findings` | distinct signatures found so far |
-| `hang`, `crash` | programs where a rank timed out or died |
-| `oom` | programs killed for running out of memory (the Docker memory limit) |
-| `checked` | programs whose values the reference model could fully verify |
-
-The final JSON line adds `valid` / `invalid` / `uncertain` (the reference model's verdict on each program: legal, should raise, or not modeled) and `restarts` (times the rank processes were restarted).
-
-**Output folder** (`--out runs/<name>`):
-
-| Path | Contents |
-|---|---|
-| `findings/<id>.json` | one file per signature: kind, signature, the program, per-rank evidence |
-| `findings/<id>_repro.py` | written by `minimize`: the standalone repro |
-| `corpus/` | programs that raised coverage (every mode); guided mode mutates them |
-| `stats.jsonl` | one progress snapshot per line, for plotting |
-| `summary.json` | final stats and the list of findings |
-| `logs/` | per-rank logs from crashes and hangs |
-
-**Minimizer:** `5 -> 2 calls; repro: runs/.../<id>_repro.py` means the failing program shrank from 5 calls to 2 and the repro was written.
-
-**Bundle** (`bundles/<name>/`): open `report.html`. It shows the title, how far the program was minimized, reliability (for example `20/20 deterministic` on 2.14.0) and a table of releases marked bad or good, plus `run.sh` to rerun it.
-
-## Quickstart
-
-Everything that starts more than one rank runs in Docker. Crashing ranks are the point of the exercise, and on a laptop host they bring up OS crash dialogs and starve the machine.
+Multi-rank runs happen inside Docker, because the fuzzers make ranks crash and hang on purpose. You need Docker with 4 CPUs and 4 GB of memory, and Python 3.10 or newer for the host tools.
 
 ```bash
-make docker                                  # distfuzz:cpu, python 3.12 + torch 2.14.0 CPU
-docker run --rm -it --memory 3g --cpus 4 --shm-size 1g -v "$PWD/runs:/src/runs" distfuzz:cpu bash
-
-# inside the container
-python -m distfuzz.collectives fuzz --mode random --minutes 5 --out runs/collectives
-python -m distfuzz.collectives minimize runs/collectives/findings/<id>.json
-python -m distfuzz.collectives fuzz --fault --minutes 5 --out runs/faults
-python -m distfuzz.dtensor fuzz --mode guided --world 4 --minutes 5 --out runs/dtensor
-python -m distfuzz.dcp fuzz --mode guided --minutes 5 --out runs/dcp
-DCP_PG_TIMEOUT=600 python -m distfuzz.dcp fuzz --profile train --minutes 5 --timeout 30 --out runs/train
-
-torchrun --nproc-per-node 4 examples/repros/collectives/gloo_strided_sweep.py
+git clone https://github.com/Temilola23/distfuzz.git && cd distfuzz
+make docker              # image distfuzz:cpu: Python 3.12, torch 2.14.0 CPU, distfuzz
+pip install -e ".[dev]"  # host tools: repro bundles, tests, lint
 ```
 
-`distfuzz.repro` runs on the host and starts its own containers (one pinned image per torch release):
+[Install](docs/install.md) covers images for other PyTorch releases, nightlies, inductor and C++ coverage.
+
+## Quickstart A: check your training setup
+
+The training profile generates training runs from templates copied from torchtitan, torchtune, Hugging Face, accelerate and Lightning, and checks each step against a single process: loss, gradient norm, parameters, optimizer state, and checkpoints reloaded under a different layout.
+
+```bash
+docker build --build-arg TORCH_SPEC=torch==2.14.0 -t distfuzz:mine .   # the release you train on
+docker run --rm --memory 3g --cpus 4 --shm-size 1g -e DCP_PG_TIMEOUT=600 -v "$PWD/runs:/src/runs" distfuzz:mine \
+  python -m distfuzz.dcp fuzz --profile train --minutes 10 --timeout 30 --out runs/train
+```
+
+```
+[   45.9s] NEW TRAIN|PARTIAL_ERR|train:clip|fsdp2|clip:inf|clip-impl:accel|empty-shard|RuntimeError: _foreach_norm cannot compute the infinity norm on an empty tensor ...
+[  127.2s] NEW TRAIN|HANG|load|tp|load:sd:full_bcast|...,state_dict.py:set_state_dict > distributed_c10d.py:broadcast
+```
+
+The first line says: with FSDP2 and `clip_grad_norm_(norm_type=inf)`, a rank that holds an empty shard raises while the others wait. The second: a full-state-dict broadcast load under tensor parallel hangs, with rank 0 stuck in `set_state_dict`'s broadcast.
+
+To check one configuration, take a scenario from `runs/train/findings.jsonl`, edit it to match your setup (world size, parallelism, optimizer, clip norm, checkpoint load mode), and replay it:
+
+```bash
+docker run --rm --memory 3g --cpus 4 --shm-size 1g -v "$PWD/runs:/src/runs" distfuzz:mine \
+  python -m distfuzz.dcp run runs/mine.json      # exit 0: every step matched one process
+```
+
+[Worked example: training profile and clipping](docs/examples/training-clip-inf.md).
+
+## Quickstart B: fuzz PyTorch's distributed layer
+
+For PyTorch contributors and anyone who wants to test one layer at a time:
+
+```bash
+docker run --rm -it --memory 3g --cpus 4 --shm-size 1g -v "$PWD/runs:/src/runs" distfuzz:cpu bash
+
+python -m distfuzz.collectives fuzz --mode random --minutes 5 --out runs/collectives   # c10d on Gloo
+python -m distfuzz.collectives minimize runs/collectives/findings/<id>.json
+python -m distfuzz.dtensor fuzz --world 4 --minutes 5 --out runs/dtensor                # DTensor ops
+python -m distfuzz.dcp fuzz --minutes 5 --out runs/dcp                                  # checkpoint save/load
+```
+
+On the host, turn a finding into a plain PyTorch script and check how reliably it fails:
 
 ```bash
 python -m distfuzz.repro images --only 2.14.0
-python -m distfuzz.repro bundle examples/repros/dtensor/cases.py::setitem_shard --name setitem --n 5 --no-bisect
-python -m distfuzz.repro specs examples/repro_specs.json --jobs 2   # rebuild every bundle: 20-run reliability, release bisection
+python -m distfuzz.repro bundle runs/collectives/findings/<id>.json --name my-bug --n 5 --no-bisect
 ```
 
-### Training profile
+`torch.compile` fuzzing (`distfuzz.compile`) and fault injection (`--fault`) are in the [Quickstart](docs/quickstart.md).
 
-`python -m distfuzz.dcp fuzz --profile train` generates training runs instead of checkpoint chains. It uses the DCP fuzzer's scenario format, worker ranks, reference and checkpoint oracles, and adds the parts of a training step that production stacks exercise and the classic profile does not.
+## Reading the output
 
-Each scenario starts from a template in `src/distfuzz/dcp/templates.py`. A template fixes what one stack does (torchtitan dense and MoE, the Hugging Face TP plan, torchtune LoRA, accelerate with FSDP2 or DDP, Lightning's ModelParallelStrategy) and records where each choice comes from as `repo@commit:path:line`. The generator then draws sizes that are small or uneven relative to the world size (2 to 4 Gloo ranks), so FSDP2 leaves some ranks empty dim-0 shards and MoE routers send zero tokens to some experts.
+A finding is anything the oracle flags; findings are grouped by a signature such as `WRONG_RESULT|all_reduce|torch.int64`. Each one is saved with the program that produced it.
 
-| Axis | Values |
+| You see | It means |
 |---|---|
-| Model | llama-style blocks (RMSNorm, attention, GELU MLP), MLP stacks, LoRA MLPs with a frozen base (torchtune `LoRALinear`), MoE with a top-k router and grouped experts (torchtitan), embedding plus head, tied or not |
-| Parallelism | FSDP2 per block with `reshard_after_forward` and mixed precision, TP (`ColwiseParallel`/`RowwiseParallel`, NoParallel for the rest, a loss-parallel head), FSDP2 + TP on a 2-D mesh, HSDP, DDP, expert parallelism (`all_to_all_single` with uneven splits, functional or plain c10d) |
-| Step | gradient accumulation with or without `no_sync` / `set_requires_gradient_sync`, activation checkpointing (full or selective), SGD/Adam/AdamW with foreach or fused |
-| Clipping | `norm_type` 2, 1, 3 and inf, `foreach` on, off or default, through `torch.nn.utils.clip_grad_norm_`, torchtitan's per-mesh clip or accelerate's DTensor-aware clip |
-| Checkpoint | `dcp.save`/`async_save` and `dcp.load` of sharded state dicts, full state dicts with `cpu_offload`, `set_state_dict` with `broadcast_from_rank0` (joint call, the split API torchtune and accelerate use, or model only), resumed under another world size or parallelism |
+| `WRONG_RESULT`, `MISMATCH`, `STATE_MISMATCH`, `GNORM_MISMATCH` | a value differs from the single-process result, with no error |
+| `GUARD` | the backend wrote outside the tensor it was given |
+| `PARTIAL_ERR`, `RANK_DIVERGENT_ERROR` | some ranks raised while the others waited in a collective |
+| `HANG\|cpu\|_view_ops.py:view_groups:...` | every rank is spinning in that function |
+| `HANG\|collective\|wait_tensor\|ranks-missing:[2, 3]` | ranks 0 and 1 wait in a collective that ranks 2 and 3 never entered |
+| `4 -> 2 calls; repro: .../<id>_repro.py` | the minimizer shrank the program from 4 calls to 2 |
+| `reliability 3/3 deterministic` | the plain PyTorch repro failed in 3 of 3 fresh containers |
 
-Signatures name the configuration axes that matter for the phase that failed, for example `TRAIN|PARTIAL_ERR|train:clip|fsdp2|clip:inf|clip-impl:torch|empty-shard|RuntimeError: _foreach_norm cannot compute the infinity norm on an empty tensor`. `PARTIAL_ERR` means some ranks raised and the others were stuck in a collective; `HANG` findings carry each rank's last phase and its stack location (`state_dict.py:set_state_dict > distributed_c10d.py:broadcast`), read from a faulthandler dump. `python -m distfuzz.dcp minimize` replays training scenarios on persistent worlds and shrinks them (fewer segments, steps and blocks, smaller layers, fewer axes) while the finding's kind, phase and message stay the same.
+[Reading the output](docs/output.md) lists every kind and every file a run writes.
 
-The second round of the profile added these axes. Each comes from a template with its provenance (`titan-sp`, `titan-pp`, `mcore-fsdp2`, `accel-fp8`, compile on the accelerate templates).
+## Worked examples
 
-| Axis | Values |
+| Example | Shows |
 |---|---|
-| Sequence parallelism | `SequenceParallel` norms, colwise inputs gathered from `Shard(1)`, rowwise outputs reduce-scattered to `Shard(1)`, a sequence-sharded embedding output and lm_head input, optionally with the loss-parallel head (torchtitan's default TP plan) |
-| Pipeline parallelism | `PipelineStage` model chunks that keep the model's FQNs, schedules GPipe, 1F1B, Interleaved1F1B, LoopedBFS, InterleavedZeroBubble, ZBVZeroBubble and DualPipeV, 2 to 4 stages or 2 x 2 PP x FSDP2, torchtitan's loss scaling and PP-aware clip; checkpoints through torchtitan's model and optimizer containers, so a run can resume between PP and non-PP layouts |
-| `torch.compile` | per block before FSDP (`torch.compile(block)`), in place after FSDP (`Module.compile()`, accelerate's regional compile), or the whole model; `aot_eager`, and `inductor` when a C++ compiler is present (the `distfuzz:cpu-cc` image); each rank gets its own inductor cache directory |
-| FSDP2 knobs | gradient divide factor 1 with the loss scaled by 1/dp, `set_unshard_in_backward(False)`, forward and backward prefetch chains, `fully_shard([last norm, head])`, deferred reduction across accumulation steps, `reshard_after_forward` as an int, `DeviceMesh.from_group`; 1 x 4 and 4 x 1 meshes |
-| float8 | torchao `convert_to_float8_training` as accelerate applies it, with float8 all-gather and scale precompute; only when torchao is installed |
+| [Gloo strided all_reduce](docs/examples/gloo-strided-allreduce.md) | a 5-minute campaign, minimizing a finding to 2 calls, a plain PyTorch repro |
+| [Training profile and clipping](docs/examples/training-clip-inf.md) | training signatures, the known-bug predictor, replaying one configuration |
+| [DTensor hang and the watchdog](docs/examples/dtensor-hang.md) | hang signatures that name the stuck loop, a 5-step repro of an infinite loop |
+| [Checkpoint load hang](docs/examples/checkpoint-broadcast-hang.md) | a load that returns on one rank without loading, then hangs the next collective |
+| [Two GPUs on Kaggle](docs/examples/kaggle-two-gpus.md) | NCCL collectives, DTensor on CUDA and the training profile on a free 2 x T4 notebook |
 
-`--known-rate R` runs a scenario that `dcp/known.py` predicts will hit a known bug (from its configuration alone) with probability R, so campaign time goes to new ground while regressions still show; `stats.jsonl` counts skipped, useful and known-only scenarios. `--device cuda` runs the workers on NCCL with one GPU per rank and a CPU reference; no Gloo group is created in that mode.
+The outputs in the examples come from real runs.
 
-Set `DCP_PG_TIMEOUT` above `--timeout` so a stuck collective is reported by the harness with stack locations rather than as a Gloo timeout. The tests in `tests/dcp/test_train_multirank.py` check that the profile rediscovers the inf-norm clipping crash on FSDP2 and the `set_state_dict(broadcast_from_rank0)` hang, and that expert parallelism matches the single-process MoE.
+## Bugs found
 
-**C++ coverage.** `docker/Dockerfile.cov` builds PyTorch v2.14.0 from source with clang and SanitizerCoverage in Gloo and c10d only (128,324 edges; about 20 GB of memory and 1-2 hours to build). `--signal cxx` reads the counters in every rank. In guided mode a program with new C++ features is re-run twice; features a re-run does not reproduce are dropped and ignored from then on, and the program is shrunk to the calls the new features need before it enters the corpus.
+44 verified entries in PyTorch 2.14.0, each with a standalone script and a cause located at a source line. All but the two NCCL-only entries also reproduce on a November 2026 nightly. 34 matched no issue or pull request in the PyTorch tracker; 4 have a related pull request or an incomplete earlier fix; 6 extend an open issue. 22 return a wrong value with no error on any rank. Nothing has been filed upstream yet.
 
-```bash
-docker build -f docker/Dockerfile.cov -t distfuzz:cov .
-docker run --rm --memory 3g --cpus 4 --shm-size 1g -v "$PWD/runs:/src/runs" distfuzz:cov \
-  python -m distfuzz.collectives fuzz --mode guided --signal cxx --minutes 10 --out runs/cxx
-```
-
-Another torch build for the fuzzers: `docker build --build-arg TORCH_SPEC=torch --build-arg TORCH_INDEX=https://download.pytorch.org/whl/nightly/cpu -t distfuzz:nightly .`
-
-Host-only development (no ranks): see [CONTRIBUTING.md](CONTRIBUTING.md).
-
-## Compile-path fuzzing
-
-`distfuzz.compile` looks for bugs that appear only when DTensor, FSDP2 or tensor parallel code runs under `torch.compile`. Inductor on CPU needs a C++ compiler, which `distfuzz:cpu` does not have; `docker/Dockerfile.cc` adds `g++` on top of any distfuzz image without changing it.
-
-```bash
-docker build -f docker/Dockerfile.cc --build-arg BASE=distfuzz:cpu -t distfuzz:cpu-cc docker
-docker run --rm --cpus 3 --memory 3g --shm-size 1g -v "$PWD/runs:/src/runs" distfuzz:cpu-cc \
-  python -m distfuzz.compile fuzz --minutes 45 --seed 1 --out runs/compile
-python -m distfuzz.compile minimize runs/compile/findings.jsonl --index 3   # inside the container
-python -m distfuzz.compile repro runs/compile/min_3.json --out repro.py      # plain PyTorch, run with torchrun
-```
-
-Two tracks share one loop:
-
-| Track | Program | Legs |
+| Area | Entries | For example |
 |---|---|---|
-| op (75%) | A DTensor generator program (same generator as `distfuzz.dtensor`, at most 14 steps) turned into one Python function: each `mk(j)` step becomes an argument, the other steps its body, the step outputs its return value. A config picks the backend (`aot_eager` or `inductor`), `fullgraph`, and `dynamic=False`, `dynamic=True` or `mark` (`maybe_mark_dynamic` on every sharded dim). | Plain-tensor reference; eager DTensor; compiled plain tensors (control); compiled DTensor, with backward when the program has one. Then a second call with fresh inputs of the same shape (recompiles, determinism) and a call on inputs where one sharded size is changed in every input that has it, without recompiling by hand. |
-| module (25%) | A small model (embedding or linear input, 1-2 residual MLP blocks with LayerNorm, RMSNorm or none, a head) under FSDP2, TP (optionally sequence parallel) or FSDP2+TP on a 2x2 mesh, trained 2-4 steps with SGD or Adam. Compile per block before `fully_shard` (torchtitan's former layout) or the whole model after sharding. | Single process; eager parallel; compiled single process (control); compiled parallel. Losses per step and final parameters are compared. |
+| Gloo, NCCL, c10d, CPU optimizer kernels | 9 | `all_reduce` on a strided view: wrong values on every rank (§1); NCCL `scatter`, `gather`, `reduce_scatter_tensor` skip the contiguity check (§75) |
+| DTensor | 19 | `mse_loss` gradient times world size (§72); `flatten()` of a zero-size DTensor never returns (§3) |
+| Checkpointing, FSDP2, TP, pipeline parallel, optimizers | 12 | zero-bubble pipeline schedules with resharding FSDP2 stages: weight gradients missing or wrong, no error (§33); inf-norm clipping with an empty FSDP2 shard hangs (§30); `set_state_dict(broadcast_from_rank0=True)` leaves ranks stale and then hangs (§6) |
+| `torch.compile` over DTensor | 4 | CPU ranks share one AOTAutograd cache entry and load each other's graphs: wrong loss and gradients on every rank (§53) |
 
-A difference counts only when eager DTensor matches the reference and the compiled plain-tensor control does not show the same difference, so inductor's own numerics and plain compile errors are filtered out. Outputs that backward does not start from are detached inside the function, because AOTAutograd guesses a DTensor tangent for every output that requires grad ([#172556](https://github.com/pytorch/pytorch/issues/172556)). Tensor-parallel dims in the module track are divisible by the TP degree, since uneven TP shards already fail in eager mode; FSDP2 shards stay uneven.
+[Bugs found](docs/bugs.md) has the full list with causes, upstream status, impact ratings and repro scripts.
 
-Signatures name the track, backend, dynamic mode, finding kind and op, for example `COMPILE|inductor|mark|MISMATCH|redistribute|dtype` or `MODULE|fsdp_tp|aot_eager|static|per_module|PARAM_MISMATCH|inp.weight|values`. `findings.jsonl` keeps the first program per signature and `failing.jsonl` keeps every failing program, so several hangs with one signature stay apart. Each rank writes the leg it is in to `logs/rank<r>.leg`, so a hang names its leg. Eager legs use a 30 s collective timeout and compiled legs 120 s, because ranks compile at different speeds. Each rank gets its own inductor cache directory: with one shared directory (the torchrun default) CPU ranks load each other's compiled DTensor graphs, which gives wrong values and crashes unrelated to the program; `--shared-cache` turns that back on to look for that class.
+## GPUs
 
-## Verified bugs
+The collectives fuzzer runs on NCCL (`--backend nccl`), and the DTensor and training fuzzers run their ranks on CUDA (`--device cuda`), one GPU per rank, with a CPU reference. [`examples/kaggle/distfuzz_two_gpus.ipynb`](examples/kaggle/distfuzz_two_gpus.ipynb) runs all three on a free Kaggle 2 x T4 notebook; [Two GPUs on Kaggle](docs/examples/kaggle-two-gpus.md) explains the settings and the results of a recorded run.
 
-Every row reproduces from a plain PyTorch script with no distfuzz imports on torch 2.14.0, CPU/Gloo, and on nightly 2.15.0.dev20260926 unless marked "2.14.0 only" (nightly not re-run). "Not previously reported" means a search of the pytorch/pytorch tracker found no duplicate; nothing has been filed upstream yet. The Gloo and DTensor rows were re-checked by a separate verification pass that wrote its own repros (20/20 runs each unless noted). Rows giving a cause were root-caused to the cited lines (v2.14.0) by patching them and re-running: the failure goes away and results match a single-process reference.
+## How it works
 
-| Area | Bug | Status | Upstream |
-|---|---|---|---|
-| Gloo | `all_reduce` and `reduce_scatter` on a strided, non-dense view return wrong values on every rank and write into the holes of the view's span; `expand`ed views write past the allocation | Not previously reported for these ops; deterministic from 2.1.2 to nightly | Related: [#192920](https://github.com/pytorch/pytorch/issues/192920); open fix [PR #191187](https://github.com/pytorch/pytorch/pull/191187) does not cover these two ops |
-| Gloo | `all_to_all_single` with a strided output: the check covers only the input (`ProcessGroupGloo.cpp:2444`), so Gloo writes outside the output view | Not previously reported. 2.14.0 only | none found |
-| Gloo | `reduce_scatter_single` with a 0-dim output (SIGSEGV) or an output with more dims than the input (out-of-bounds read): shapes indexed without a length check (`ProcessGroupGloo.cpp:1583-1585`) | Not previously reported. 2.14.0 only | none found |
-| Gloo | Async `reduce_scatter` / `reduce_scatter_tensor`: `is_completed()` stays False after `wait()`, `get_future()` raises; `LambdaWork` never calls `finish()` (`ProcessGroupGloo.cpp:1543-1554`) | Not previously reported. 2.14.0 only | none found |
-| Gloo | `reduce`, `broadcast`, `scatter` on strided views: wrong values | Known | [#192920](https://github.com/pytorch/pytorch/issues/192920), [#24836](https://github.com/pytorch/pytorch/issues/24836) |
-| Gloo | `resize_` or `set_` on a tensor while an async collective on it is in flight: uncatchable SIGABRT, sometimes SIGSEGV | 10/10 on 2.14 and nightly, also with contiguous tensors. Arguably API misuse, but Python code should not be able to corrupt memory. Not independently verified | Related: [#81684](https://github.com/pytorch/pytorch/issues/81684) (same `pair.cc` enforce) |
-| DTensor | `flatten()` / `view(-1)` of a zero-size DTensor loops forever in `view_groups` | Not previously reported. Cause: a leading 0 closes the first group early and the step-back branch repeats the same state (`_view_ops.py:465, 487-490`) | none found |
-| DTensor | `mse_loss`, `smooth_l1_loss`, `huber_loss` (mean) with uneven shards: NaN, or a silently wrong value without an empty shard (4.6% low for 3 rows on 2 ranks) | Not previously reported. Cause: their strategy comes from the decomposition path, which expands to the real mesh without `mean`'s uneven-shard filter (`_decompositions.py:240-246`). 2.14.0 only | Sibling of [#185167](https://github.com/pytorch/pytorch/issues/185167); [#162692](https://github.com/pytorch/pytorch/issues/162692) fixed `mean` but the decomposition path bypasses that fix |
-| DTensor | Full `max()`/`min()` with an empty shard: some ranks raise, others enter the collective (desync) | Not previously reported. Cause: treated as a linear reduction (`_math_ops.py:386-388`), but `max` of an empty local shard raises. 2.14.0 only | Related: [#143372](https://github.com/pytorch/pytorch/issues/143372) |
-| DTensor | `vector_norm(ord=inf)` on a `Partial(max)` input: wrong value; wrong up to 2.9.1, correct on 2.10.0, wrong again from 2.11.0 (#174617 bypasses the guard from #165962) | Not previously reported | none found |
-| DTensor | Embedding output (`_MaskPartial`) can be reduced only once in eager mode | Not previously reported (compile variants known). Cause: the mask is released after the first reduction (`placement_types.py:1981`) while the placement stays. 2.14.0 only | Related: [#160697](https://github.com/pytorch/pytorch/issues/160697), [#159843](https://github.com/pytorch/pytorch/issues/159843) |
-| DTensor | `squeeze()` on a zero-size DTensor moves the shard dim | Not previously reported. Cause: `dim_squeeze` drops size-0 dims as if size 1 (`_view_ops.py:589`). 2.14.0 only | Non-empty case: [#166124](https://github.com/pytorch/pytorch/issues/166124) (fixed) |
-| DTensor | `F.embedding` with a row-sharded weight where some rank's shard is empty (5 rows on 4 ranks): that rank raises in `index_select`, the others then fail inside the collective | Not previously reported. Cause: `_MaskPartial` maps out-of-shard indices to local row 0 (`placement_types.py:1944`), which an empty shard does not have. 2.14.0 only | Related: [#159601](https://github.com/pytorch/pytorch/issues/159601), [#160697](https://github.com/pytorch/pytorch/issues/160697) |
-| DTensor | Integer `Replicate` operand converted to `Partial(sum)`: `p + r` returns float32, `slice_scatter` / `copy_` into a `Partial(sum)` output lose 1 on odd values | Not previously reported. Cause: `Partial._partition_value` splits with true division (`placement_types.py:1857`); an exact integer split fixes every case. 2.14.0, same code on main | Related: [#163193](https://github.com/pytorch/pytorch/issues/163193) |
-| DTensor | `conv1d` silently wrong whenever sharding propagation asks for a redistribution: a sharded weight (output or input channels), or a batch shard with an empty rank. The output is labelled `Replicate` but holds each rank's local result | Known mechanism, not fixed: `convolution_handler` propagates but never redistributes (`_tp_conv.py:249-274`); a handler that redistributes fixes all cases. 2.14.0 and main | Described for depthwise conv in [PR #186129](https://github.com/pytorch/pytorch/pull/186129) (closed, not merged) |
-| DTensor | `x[i] = v` on a sharded dim is silently dropped | Known class | [#147570](https://github.com/pytorch/pytorch/issues/147570) |
-| DTensor | Backward through `split(...)[k]` fails with mixed Tensor/DTensor | Known | [#118461](https://github.com/pytorch/pytorch/issues/118461), [PR #198429](https://github.com/pytorch/pytorch/pull/198429) |
-| DTensor | `fill_` on `Partial(sum)` keeps the Partial (gives 12, not 3) | By design: an upstream test asserts it | [#172485](https://github.com/pytorch/pytorch/issues/172485) |
-| DCP | `DefaultLoadPlanner(flatten_state_dict=False)` drops every non-tensor value, and with nested dicts the whole model and optimizer, while `dcp.load` returns normally | No duplicate found. Cause: `load_bytes` writes into the copy `_flatten_sharded_tensors` returns (`default_planner.py:391`) | none found |
-| DCP | `set_state_dict(full_state_dict=True, broadcast_from_rank0=True)` with the empty dicts that `get_state_dict(..., cpu_offload=True)` returns on non-zero ranks: rank-divergent collectives, hang | No duplicate found. Cause: `optim_only=not model_state_dict` is decided per rank (`state_dict.py:1537`). 2.14.0 only | Probable cause of [#157781](https://github.com/pytorch/pytorch/issues/157781) |
-| DCP | `set_state_dict(full_state_dict=True, flatten_optimizer_state_dict=True)` cannot load `get_state_dict`'s own output (`KeyError`) | No duplicate found. Cause: the local reference dict is built still flattened (`state_dict.py:1141-1143`). 2.14.0 only | Related: [#192224](https://github.com/pytorch/pytorch/issues/192224), [#137327](https://github.com/pytorch/pytorch/issues/137327) |
-| DCP | Full `set_state_dict` fails for an optimizer with no tensor state (SGD, `momentum=0`) | No duplicate found. Cause: device taken only from optimizer tensor state (`state_dict.py:1157`), and the empty `state` is lost in flattening. 2.14.0 only | Related: [#192225](https://github.com/pytorch/pytorch/issues/192225) |
-| DCP | `SGD(fused=True)` on DTensor params: no sharding strategy for `_fused_sgd_` | No duplicate found. Cause: missing from the fused ops in `_pointwise_ops.py:544-552`. 2.14.0 only | none found |
-| DCP | `RowwiseParallel` on a Linear with fewer input features than the TP degree: weight is `Shard(1)`, grad comes back `Replicate` | No duplicate found. Cause: `is_tensor_shardable` (`_ops/utils.py:173`) drops the grad's `Shard(1)` strategy. 2.14.0 only | Same family as [#150336](https://github.com/pytorch/pytorch/issues/150336) |
-
-Standalone repros are in [`examples/repros/`](examples/repros). Release bisection (2.4.1 to nightly) of the nine bundled Gloo and DTensor bugs found none fixed in any tested build.
-
-## Status
-
-Verdict from an independent review against syzkaller and published DL fuzzers: **prototype** (on a toy, prototype, research-grade scale).
-
-What holds up:
-- The oracles are the strongest part: a cell-by-cell reference model for collectives (111 multi-rank tests check the model and the executor against real Gloo), a sentinel oracle that turned "wrong result" into "writes outside the view", and cross-rank error-symmetry checks.
-- Findings minimize to 1 to 4 calls and reproduce deterministically.
-
-What does not, yet:
-- Coverage guidance is not earning its keep yet. Python line coverage saturates within minutes and cannot see the C++ where the confirmed collectives bugs live. With C++ coverage (`--signal cxx`), a 5-seed, 10-minute comparison still put random ahead on stable C++ edges reached (median 6,454 vs 5,375, every seed). Random runs end within 40 edges of each other, so the limit is what the descriptions can express rather than the search. For DTensor, Python guidance added about 1% coverage.
-- A single-op property test of about 250 lines rediscovers most of the headline bugs within minutes. So far the multi-call program machinery is not what finds bugs; baselines at equal budget are the next thing to run.
-- The fuzz loop does not deflake findings or reload its corpus between runs. `distfuzz.repro` measures reliability after the fact.
-- API breadth: 26 of 26 c10d collective and p2p calls (all_reduce, broadcast, reduce, all_gather, all_gather_into_tensor, reduce_scatter, reduce_scatter_tensor, all_to_all_single, scatter, gather, barrier, monitored_barrier, p2p, ring, all_gather_object, broadcast_object_list, all_reduce_coalesced, all_gather_coalesced, gather_object, scatter_object_list, send_object_list + recv_object_list (paired, as `p2p_object`); async via wait), 544 to 545 of the 632 aten ops with a DTensor sharding strategy or rule on torch 2.14 (base names reached when 2,000 generated programs are replayed on plain tensors; 544, 545 and 544 for seeds 0 to 2, 556 over the three), among them linalg, broadcasting `linalg.cross`, integer matmul, every `_foreach` variant, CPU fused Adam/AdamW, torch.special and prims special functions, and 2-D/3-D pooling and upsampling. About 30 of the remaining 76 can never count this way: they are CompositeImplicit (`clip`, `relu6`, `square`) or registered only as `.out` overloads (`zero`, `fill`, `copy`); the rest are random ops, FFT/complex and CUDA attention. Generated ops with no registered strategy of their own (most losses, `addbmm`, `addmv`) are not in this count. Gloo on CPU only; NCCL is untested.
-- Campaigns so far are 15 to 75 minutes on 4 CPUs.
-
-[BACKLOG.md](BACKLOG.md) has the roadmap in priority order.
-
-## Repository layout
-
-```
-distfuzz/
-├── src/distfuzz/
-│   ├── collectives/            c10d/Gloo fuzzer
-│   │   ├── desc.py             API descriptions: every call, its argument types, return types and pick weight
-│   │   ├── prog.py             program generator and mutator (insert, remove, change arg, splice, diverge)
-│   │   ├── tensors.py          builds each rank's input tensors, including strided views with sentinel cells
-│   │   ├── semantics.py        shared rules for roots, group membership and shapes
-│   │   ├── interp.py           runs one program on one rank; Python line coverage via sys.monitoring
-│   │   ├── cxxcov.py           reads the C++ edge counters of an instrumented build (--signal cxx)
-│   │   ├── executor.py         keeps N rank processes alive; runs programs, restarts on hang or crash
-│   │   ├── reference.py        single-process reference model: expected value of every tensor on every rank
-│   │   ├── oracle.py           compares ranks with the reference and turns differences into findings
-│   │   ├── faults.py           fault and lifecycle ops for --fault mode (drop a Work, resize in flight, abort)
-│   │   ├── fuzzer.py           the main loop: pick or mutate a program, run, check, record, keep corpus; C++ triage
-│   │   ├── minimize.py         delta-debugging minimizer for findings
-│   │   ├── replay.py           replays a crash or hang with the programs that ran before it
-│   │   └── __main__.py         CLI: fuzz, bench, minimize, replay
-│   ├── dtensor/                DTensor differential fuzzer
-│   │   ├── gen.py              op templates, meshes, placements and shapes; builds programs
-│   │   ├── runtime.py          inputs, tolerances and value comparison
-│   │   ├── worker.py           runs a program on one rank, sharded and plain, and reports mismatches
-│   │   ├── world.py            starts and talks to the rank processes
-│   │   ├── fuzz.py             the main loop and CLI
-│   │   ├── minimize.py         ddmin minimizer and repro writer
-│   │   └── report.py           summarizes a campaign
-│   ├── compile/                torch.compile over DTensor programs and FSDP2/TP models (four legs per program)
-│   ├── dcp/                    distributed checkpoint fuzzer
-│   │   ├── gen.py              scenarios: model, parallelism, save/load options, layout changes
-│   │   ├── runtime.py          small models (MLP, attention, norms) and the save/load/compare steps
-│   │   ├── worker.py, world.py rank process and the world that drives it
-│   │   ├── standalone.py       runs one scenario on its own, for repros
-│   │   ├── fuzz.py             the main loop and CLI
-│   │   ├── minimize.py         scenario minimizer
-│   │   └── report.py           summarizes a campaign
-│   └── repro/                  syzbot-style bundles, reliability and bisection
-│       ├── extract.py          loads a finding or repro script from any fuzzer
-│       ├── gen_distfuzz.py     turns a collectives finding into a plain PyTorch script
-│       ├── gen_dtensor.py      the same for DTensor findings
-│       ├── pipeline.py         reproduce, minimize, reliability (k/N) and per-release testing
-│       ├── dock.py             builds one Docker image per PyTorch release and runs fresh containers
-│       ├── versions.py         the release matrix (2.4.1 to 2.14.0 and a pinned nightly)
-│       ├── report.py           parses tracebacks into titles and guilty frames
-│       ├── dedup.py            groups bundles that are the same bug
-│       ├── upstream.py         searches pytorch/pytorch for related issues
-│       ├── bundle.py           writes a bundle folder
-│       ├── render.py           REPORT.md, report.html and the index.html dashboard
-│       ├── cli.py, __main__.py CLI: images, bundle, specs, reliability, dedup, dashboard, upstream
-│       └── Dockerfile.torch    image template for a given PyTorch release
-├── tests/                      host tests; multi-rank tests are marked `multirank` and run in Docker
-├── examples/
-│   ├── repros/                 plain PyTorch scripts, one or more per bug (collectives, dtensor, dcp, faults)
-│   ├── programs/               the fuzzer programs behind the repro bundles
-│   └── repro_specs.json        list of bundles to build with `distfuzz.repro specs`
-├── docs/PR_GUIDE.md            how to write and review a PR
-├── .github/                    CI workflow, PR template, issue templates
-├── Dockerfile, Makefile        the distfuzz:cpu image and common commands
-├── docker/                    Dockerfile.cov (PyTorch built with C++ coverage) and its counter runtime, cov/dfcov.c; Dockerfile.cc (adds g++ for inductor)
-├── BACKLOG.md                  roadmap and open questions
-└── CHANGELOG.md
-```
+Each fuzzer generates programs from typed descriptions of an API, runs them on a set of persistent rank processes, and compares the result with an independent single-process computation: a reference model of every collective for c10d, the same program on plain tensors for DTensor, an unsharded training run for FSDP2 and checkpoints. Findings are deduplicated by signature, shrunk by delta debugging, and turned into standalone scripts. The design follows [syzkaller](https://github.com/google/syzkaller). [Architecture](docs/architecture.md) has the components, the mapping to syzkaller, the repository layout, and the current limitations. [Fuzzer details](docs/fuzzers.md) lists what the training profile and the compile fuzzer generate.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/PR_GUIDE.md](docs/PR_GUIDE.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/PR_GUIDE.md](docs/PR_GUIDE.md). `make check` runs lint, type checks and host tests; `make docker-test` runs the multi-rank tests.
 
 ## License
 
