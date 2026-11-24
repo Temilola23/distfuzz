@@ -23,6 +23,8 @@ Plain PyTorch scripts, no distfuzz imports. Run them in the Docker image (`make 
 | DTensor A10 embedding with an empty row shard | `dtensor/cases.py` | `python cases.py embedding_empty_shard` |
 | DTensor A11 integer Replicate -> Partial(sum) | `dtensor/cases.py` | `python cases.py int_replicate_to_partial 2` |
 | DTensor A12 `conv1d` with a sharded weight | `dtensor/cases.py` | `python cases.py conv1d_sharded_weight` |
+| DTensor §72 `mse_loss` gradient times world size | `dtensor/mse_loss_grad.py` | `torchrun --nproc-per-node 2 mse_loss_grad.py` |
+| Training §30 inf-norm `clip_grad_norm_` with an empty FSDP2 shard | `train/clip_inf_empty_shard.py` | `python clip_inf_empty_shard.py` |
 | DCP A1 `flatten_state_dict=False` drops loaded values | `dcp/noflat_drops_values.py` | `python noflat_drops_values.py` |
 | DCP A2 flattened optimizer state + full state dict `KeyError` | `dcp/flat_osd_full_load.py` | `python flat_osd_full_load.py 2 1` |
 | DCP A3 full state dict into a stateless optimizer | `dcp/full_sd_stateless_optim.py` | `python full_sd_stateless_optim.py` |

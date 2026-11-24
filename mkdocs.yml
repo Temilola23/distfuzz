@@ -1,0 +1,57 @@
+site_name: distfuzz
+site_description: Differential fuzzers for distributed PyTorch
+site_url: https://temilola23.github.io/distfuzz/
+repo_url: https://github.com/Temilola23/distfuzz
+repo_name: Temilola23/distfuzz
+edit_uri: edit/main/docs/
+copyright: All rights reserved. See LICENSE.
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Light mode
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.highlight
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+nav:
+  - Home: index.md
+  - Install: install.md
+  - Quickstart: quickstart.md
+  - Reading the output: output.md
+  - Worked examples:
+      - examples/index.md
+      - Gloo strided all_reduce: examples/gloo-strided-allreduce.md
+      - Training profile and clipping: examples/training-clip-inf.md
+      - DTensor hang and the watchdog: examples/dtensor-hang.md
+      - Checkpoint load hang: examples/checkpoint-broadcast-hang.md
+      - Two GPUs on Kaggle: examples/kaggle-two-gpus.md
+  - Bugs found: bugs.md
+  - Command reference: cli.md
+  - Fuzzer details: fuzzers.md
+  - Architecture: architecture.md
+  - Pull requests: PR_GUIDE.md
